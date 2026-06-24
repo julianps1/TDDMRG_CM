@@ -207,6 +207,26 @@ if MAIN_PROCESS:
     h1eshape = h1e.shape
     g2eshape = g2e.shape
 
+    #==== Modify the integrals for static field ====#
+    if inputs["static_electric_field"] is not None:
+        field = np.asarray(inputs["static_electric_field"], dtype=float)
+        origin = np.asarray(inputs["field_origin"], dtype=float)
+
+        with mol.with_common_orig(origin):
+            r_ao = mol.intor("int1e_r", comp=3)
+
+        h_field_ao = np.einsum("x,xij->ij", field, r_ao)
+
+        i0 = inputs["nCore"]
+        i1 = inputs["nCore"] + inputs["nCAS"]
+        c_act = orbs[:, i0:i1]
+
+        h1e = h1e + c_act.T @ h_field_ao @ c_act
+
+    if inputs["include_core_field_energy"] and inputs["nCore"] > 0:
+        c_core = orbs[:, :inputs["nCore"]]
+        ecore += 2.0 * np.trace(c_core.T @ h_field_ao @ c_core)
+
     #==== Get the symmetries ====#
     molpro_osym, molpro_wsym = \
         get_syms(mol, inputs['wfn_sym'], inputs['nCore'], inputs['nCAS'], orbs)

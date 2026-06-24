@@ -525,6 +525,23 @@ def get_inputs(inp_file):
         except NameError:
             inputs['ann_out_cpx'] = defvals.def_ann_out_cpx
 
+
+    #==== Add a static electric field to the Hamiltonian====#
+    try:
+        inputs["static_electric_field"] = static_electric_field
+    except NameError:
+        inputs["static_electric_field"] = None
+
+    try:
+        inputs["field_origin"] = field_origin
+    except NameError:
+        inputs["field_origin"] = (0.0, 0.0, 0.0)
+    
+    try:
+        inputs["include_core_field_energy"] = include_core_field_energy        
+    except NameError:
+        inputs["include_core_field_energy"] = True
+
     #==== Time evolution parameters ====#
     # do_timeevo:
     #   True or False. If True, time evolution simulation using TDDMRG will be
