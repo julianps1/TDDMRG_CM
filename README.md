@@ -64,7 +64,7 @@ source = 'rhf'
 localize = False
 
 ```
-Running `get_orbs H2O.py` this will create the files numpy arrays that include the orbitals, ccupations, energies and reduced density matrix that will be used in the next step of the calculation. Available electronic structure methods are restricted hartree-fock `rhf`, complete active space `casscf` and density functional theory `dft`. For CASSCF calculations, the number of CAS orbitals, core orbitals, and CAS electrons are required. For DFT the exchange correlation `xc` functional must be specified. The orbitals are generated using pySCF. 
+Running `get_orbs H2O.py` this will create the files numpy arrays that include the orbitals, ccupations, energies and reduced density matrix that will be used in the next step of the calculation. Available electronic structure methods are restricted hartree-fock `rhf`, complete active space `casscf` and density functional theory `dft`. For CASSCF calculations, the number of CAS orbitals, core orbitals, and CAS electrons are required. For DFT the exchange correlation `xc` functional must be specified. The orbitals are generated using PySCF. 
 
 ## Ground state DMRG
 
