@@ -97,7 +97,7 @@ if do_groundstate:
 do_annihilate = False
 do_timeevo = False
 ```
-Here, it is assumed that some orbitals have were calculated in the previous step and are stored in a numpy file whose full path is `/absolute/path/to/orbital/H2O.orb.npy`. The output of this calculation contains a line that shows the final ground state energy
+Here, it is assumed that some orbitals were calculated in the previous step and are stored in a numpy file whose full path is `/absolute/path/to/orbital/H2O.orb.npy`. The output of this calculation contains a line that shows the final ground state energy
 ```
  Ground state energy =   -76.2393734097
 ```
