@@ -1618,25 +1618,53 @@ class MYTDDMRG:
             # Just duplicate the input MPS if it is complex, regardless of
             # whether it is of multi MPS or normal MPS type. The comp type
             # does not matter either here.
-            cmps = mps.deep_copy('mps_t')
+            if self.mpi is None or self.mpi.rank == 0:
+                cmps = mps.deep_copy('mps_t')
         else:
             # If the input MPS is real (impliying comp=False), then use a
             # multi MPS to transform it to a complex multi MPS.
-            cmps = bs.MultiMPS.make_complex(mps, "mps_t")
+            if self.mpi is None or self.mpi.rank == 0:
+                cmps = bs.MultiMPS.make_complex(mps, "mps_t")
+        if self.mpi is not None:
+            if self.mpi.rank == 0:
+                cmps.info.save_data(self.scratch + '/mps_t-info')
+            self.mpi.barrier()
+            if self.mpi.rank != 0:
+                cmps_info = (brs.MultiMPSInfo(0) if inmps_multi or not inmps_cpx
+                             else brs.MPSInfo(0))
+                cmps_info.load_data(self.scratch + '/mps_t-info')
+                cmps_info.load_mutable()
+                cmps = (bs.MultiMPS(cmps_info) if inmps_multi or not inmps_cpx
+                        else bs.MPS(cmps_info))
+                cmps.load_data()
+                cmps.load_mutable()
+            self.mpi.barrier()
         _print('Initial canonical form (ortho. center) = ' +
                f'{cmps.canonical_form} ({cmps.center})')
 
         #==== Make the MPS for autocorrelation's t0 ====#
         #====   complex when using hybrid complex   ====#
         if mps_act0_cpx:
-            cmps_act0 = mps_act0.deep_copy('mps_act0')
+            if self.mpi is None or self.mpi.rank == 0:
+                cmps_act0 = mps_act0.deep_copy('mps_act0')
         else:
-            cmps_act0 = bs.MultiMPS.make_complex(mps_act0, "mps_act0")
-
-
-        # The copies above materialize MPS data in shared scratch. All ranks
-        # must finish creating those files before any rank tries to load them.
+            if self.mpi is None or self.mpi.rank == 0:
+                cmps_act0 = bs.MultiMPS.make_complex(mps_act0, "mps_act0")
         if self.mpi is not None:
+            if self.mpi.rank == 0:
+                cmps_act0.info.save_data(self.scratch + '/mps_act0-info')
+            self.mpi.barrier()
+            if self.mpi.rank != 0:
+                cmps_act0_info = (brs.MultiMPSInfo(0)
+                                  if mps_act0_multi or not mps_act0_cpx
+                                  else brs.MPSInfo(0))
+                cmps_act0_info.load_data(self.scratch + '/mps_act0-info')
+                cmps_act0_info.load_mutable()
+                cmps_act0 = (bs.MultiMPS(cmps_act0_info)
+                             if mps_act0_multi or not mps_act0_cpx
+                             else bs.MPS(cmps_act0_info))
+                cmps_act0.load_data()
+                cmps_act0.load_mutable()
             self.mpi.barrier()
 
         #==== Take care of the algorithm type (1- or 2- site) ====#
