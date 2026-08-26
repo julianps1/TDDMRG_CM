@@ -300,7 +300,7 @@ def loadMPSfromDir_OLD(mps_info: brs.MPSInfo,  mpsSaveDir:str, MPI:MPICommunicat
 #################################################
 def loadMPSfromDir(mpsSaveDir:str, mpstag:str, complex_mps:bool, mps_type:dict, impo, 
                    ref_center=0, cached_contraction:bool=True, MPI:MPICommunicator=None, 
-                   prule=None) -> bs.MPS | bs.MultiMPS:
+                   prule=None, driver=None) -> bs.MPS | bs.MultiMPS:
 
     if MPI is not None:
         assert prule is not None, 'prule is required when the MPI input is not None.'
@@ -361,12 +361,31 @@ def loadMPSfromDir(mpsSaveDir:str, mpstag:str, complex_mps:bool, mps_type:dict, 
 
     
     #==== Construct the actual MPS object ====#
-    if mps_type['type'] == 'multi':
-        mps = bs.MultiMPS(mps_info).deep_copy(mps_info.tag)
-    else:
-        mps = bs.MPS(mps_info).deep_copy(mps_info.tag)
+    use_driver_load = driver is not None and mps_type['type'] in ('normal', 'multi')
+    if MPI is None or MPI.rank == 0:
+        if use_driver_load:
+            shutil.copyfile(
+                inmps_path,
+                driver.scratch + "/%s-mps_info.bin" % mps_info.tag)
+        elif mps_type['type'] == 'multi':
+            mps = bs.MultiMPS(mps_info).deep_copy(mps_info.tag)
+        else:
+            mps = bs.MPS(mps_info).deep_copy(mps_info.tag)
+    if MPI is None and use_driver_load:
+        mps = driver.load_mps(
+            mps_info.tag,
+            nroots=mps_type.get('nroots', 1))
     if MPI is not None:
         MPI.barrier()
+        if use_driver_load:
+            mps = driver.load_mps(
+                mps_info.tag,
+                nroots=mps_type.get('nroots', 1))
+        elif MPI.rank != 0:
+            if mps_type['type'] == 'multi':
+                mps = bs.MultiMPS(mps_info)
+            else:
+                mps = bs.MPS(mps_info)
     mps_info = mps.info
     mps_info.load_mutable()
 

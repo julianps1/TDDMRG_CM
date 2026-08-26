@@ -433,8 +433,18 @@ class MYTDDMRG:
         if spin_symmetry == 'su2': symm_type = [SymmetryTypes.SU2]
         elif spin_symmetry == 'sz': symm_type = [SymmetryTypes.SZ]
         if comp == 'full': symm_type += [SymmetryTypes.CPX]
-        self.b2driver = DMRGDriver(scratch=self.scratch, symm_type=symm_type, stack_mem=4 << 30, 
-                                n_threads=56, mpi=self.mpi)
+        mps_dir = os.environ.get(
+            'ITDDMRG_MPSDIR',
+            os.path.join(os.getcwd(), os.path.basename(self.scratch) + '.mps'))
+        self.b2driver = DMRGDriver(
+            scratch=self.scratch, mps_dir=mps_dir, symm_type=symm_type,
+            stack_mem=4 << 30, n_threads=56, mpi=self.mpi is not None)
+        self.mpi = self.b2driver.mpi
+        if self.mpi is not None:
+            self.prule = bs.ParallelRuleQC(self.mpi)
+            self.pdmrule = bs.ParallelRuleNPDMQC(self.mpi)
+            self.siterule = bs.ParallelRuleSiteQC(self.mpi)
+            self.identrule = bs.ParallelRuleIdentity(self.mpi)
         swap_pg = getattr(b2.PointGroup, "swap_" + pg)
         self.b2driver.initialize_system(n_sites=self.n_sites, n_elec=n_elec, spin=twos, 
                                      singlet_embedding=False, pg_irrep=self.wfn_sym,
@@ -450,13 +460,6 @@ class MYTDDMRG:
         #                                                 MPOAlgorithmTypes.Conventional)
         #_print('TE_MPO algo type = ', MPOAlgorithmTypes.Conventional)
         
-        if self.mpi is not None:
-            self.te_mpo = bs.ParallelMPO(self.te_mpo, self.prule)
-
-
-            
-
-            
         if self.mpi is not None:
             self.mpi.barrier()
     #################################################
@@ -1700,7 +1703,8 @@ class MYTDDMRG:
             mps, mps_info, _ = \
                 loadMPSfromDir(inmps_dir, inmps_name, inmps_cpx, mps_type, idMPO,
                                cached_contraction=True, MPI=self.mpi, 
-                               prule=self.prule if self.mpi is not None else None)
+                               prule=self.prule if self.mpi is not None else None,
+                               driver=self.b2driver)
 
             
             #==== Determine the type of t=0 MPS for autocorrelation ====#
@@ -1731,7 +1735,7 @@ class MYTDDMRG:
                 loadMPSfromDir(mps_act0_dir, mps_act0_name, mps_act0_cpx, 
                                mps_act0_type, idMPO, cached_contraction=True, 
                                MPI=self.mpi, prule=self.prule if self.mpi is
-                               not None else None)
+                               not None else None, driver=self.b2driver)
             #ipsh('After loading mps')
         else:
             raise NotImplementedError('Use loadv2.')
@@ -1753,23 +1757,23 @@ class MYTDDMRG:
         
         
         #==== Initial norm ====#
-        idMPO = bs.SimplifiedMPO(bs.IdentityMPO(self.hamil), bs.RuleQC(), True, True)
-        print_MPO_bond_dims(idMPO, 'Identity_2')
+        idMPO = bs.SimplifiedMPO(
+            bs.IdentityMPO(self.hamil), bs.RuleQC(), True, True)
         if self.mpi is not None:
             idMPO = bs.ParallelMPO(idMPO, self.identrule)
-        mps_n = mps.deep_copy('mps_norm')                 # 3)
-        idN = bs.MovingEnvironment(idMPO, mps_n, mps_n, "norm_in")
-        idN.init_environments()   # NOTE: Why does it have to be here instead of between 'idMe =' and 'acorr =' lines.
-        if inmps_cpx and inmps_multi:
-            nrm = bs.ComplexExpect(idN, mps_n.info.bond_dim, mps_n.info.bond_dim)
-        else:
-            nrm = bs.Expect(idN, mps_n.info.bond_dim, mps_n.info.bond_dim)
-        nrm_ = nrm.solve(False)
+        print_MPO_bond_dims(idMPO, 'Identity_2')
+        idN = bs.MovingEnvironment(idMPO, mps, mps, "norm_in")
+        idN.delayed_contraction = b2.OpNamesSet.normal_ops()
+        idN.cached_contraction = False
+        idN.fused_contraction_rotation = True
+        idN.save_environments = False
+        idN.init_environments(self.verbose >= 3)
+        nrm = bs.Expect(idN, mps.info.bond_dim, mps.info.bond_dim)
+        nrm.iprint = max(self.verbose - 1, 0)
+        nrm_ = nrm.solve(False, mps.center != 0)
+        if self.mpi is not None:
+            self.mpi.barrier()
         _print(f'Initial MPS norm = Re: {nrm_.real:11.8f}, Im: {nrm_.imag:11.8f}')
-        # 3) We duplicate mps here to a new identical mps_n rather than using the former
-        #    because the norm calculation above changed the properties of mps such that
-        #    the overlap with initial mps (mps_act0 below) is zero in the beginning, which
-        #    should have been unity.
 
         
         #==== If a change of bond dimension of the initial MPS is requested ====#

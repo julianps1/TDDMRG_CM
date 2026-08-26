@@ -54,6 +54,12 @@ if hasMPI:
     assert commPy.Get_rank() == MPI.rank, f"{commPy.Get_rank()} vs {MPI.rank}"
     assert commPy.Get_size() == MPI.size, f"{commPy.Get_size()} vs {MPI.size}"
     MAIN_PROCESS = MPI.rank == 0
+
+    default_excepthook = sys.excepthook
+    def abort_mpi_on_exception(exc_type, exc_value, exc_traceback):
+        default_excepthook(exc_type, exc_value, exc_traceback)
+        commPy.Abort(1)
+    sys.excepthook = abort_mpi_on_exception
 else:
     MAIN_PROCESS = True
 #############################################
@@ -359,18 +365,12 @@ if MAIN_PROCESS:
     #==== Save orbital ordering ====#
     np.save(WDIR + '/' + inputs['prefix'] + '.ord', re_idx)
     
-    re_idx_shape = re_idx.shape
-    re_idx_type = type(re_idx)
     logbook.update({'orb_order_id':re_idx})
 else:
-    re_idx = re_idx_shape = re_idx_type = None
+    re_idx = None
 
 if hasMPI:
-    re_idx_shape = commPy.bcast(re_idx_shape, root = 0)
-    re_idx_type = commPy.bcast(re_idx_type, root = 0)
-    if not MAIN_PROCESS:
-        re_idx = np.empty(re_idx_shape, dtype=re_idx_type)
-    commPy.Bcast([re_idx, MPIpy.INTEGER], root=0)
+    re_idx = commPy.bcast(re_idx if MAIN_PROCESS else None, root=0)
 
 
 #==== Initiate the Hamiltonian MPO ====#
