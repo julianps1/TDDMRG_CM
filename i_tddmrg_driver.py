@@ -1610,6 +1610,9 @@ class MYTDDMRG:
                         verbose_lvl=self.verbose-1)
 
 
+        if self.mpi is not None:
+            self.mpi.barrier()
+
         #==== Make the input MPS complex when using hybrid complex ====#
         if inmps_cpx:
             # Just duplicate the input MPS if it is complex, regardless of
@@ -1631,6 +1634,11 @@ class MYTDDMRG:
             cmps_act0 = bs.MultiMPS.make_complex(mps_act0, "mps_act0")
 
 
+        # The copies above materialize MPS data in shared scratch. All ranks
+        # must finish creating those files before any rank tries to load them.
+        if self.mpi is not None:
+            self.mpi.barrier()
+
         #==== Take care of the algorithm type (1- or 2- site) ====#
         if mps.dot != 1: # change to 2dot
             cmps.load_data()
@@ -1644,6 +1652,8 @@ class MYTDDMRG:
             cmps_act0.dot = 2
             cmps.save_data()
             cmps_act0.save_data()
+            if self.mpi is not None:
+                self.mpi.barrier()
             #ipsh('After checking dot')
         if cmps.dot == 2:
             _print('Algorithm type = 2-site')
