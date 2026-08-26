@@ -1,0 +1,581 @@
+#! /usr/bin/env python
+
+# Driver-based TDDMRG_CM entry point.
+
+
+
+import os, sys, time, socket, pickle
+import numpy as np
+from scipy.linalg import eigvalsh
+from humanfriendly import format_timespan
+import block2
+from block2 import TETypes, PointGroup
+from pyscf import gto, scf, ao2mo, symm
+
+######################
+#vvvv Input File vvvv#
+######################
+from TDDMRG_CM import defvals, cm_inputs_driver as cm_inputs
+inp_file = str(sys.argv[1])
+inputs = cm_inputs.get_inputs(inp_file)
+from TDDMRG_CM.utils import util_logbook
+inputs = util_logbook.parse(inputs)     # Extract input values from an existing logbook if desired.
+if inputs['do_groundstate'] or inputs['do_annihilate']:
+    raise NotImplementedError(
+        "cm_dmrg_driver currently supports the driver-owned time-evolution workflow only; "
+        "ground-state and annihilation workflows remain available through cm_dmrg."
+    )
+######################
+#^^^^ Input File ^^^^#
+######################
+
+
+from TDDMRG_CM.utils import util_complex_type
+util_complex_type.init(inputs['complex_MPS_type'])
+from TDDMRG_CM.i_tddmrg_driver import MYTDDMRG
+from TDDMRG_CM.utils.util_qm import get_CAS_ints, get_syms, orbital_reorder, \
+    orbital_reorder_dip, orbital_reorder_mrci, orbital_reorder_mrci_dip, \
+    orbital_reorder_circ, orbital_reorder_mrci_circ
+from TDDMRG_CM.utils.util_print import getVerbosePrinter, print_warning, print_section, \
+    print_mrci_warning
+from TDDMRG_CM.utils.util_atoms import get_tot_nuc_charge, extract_atoms
+from TDDMRG_CM.orbs_generate.analyze_orbs import analyze
+yn_bools = ('No','Yes')
+
+
+#############################################
+try:
+    from mpi4py import MPI as MPIpy
+    commPy = MPIpy.COMM_WORLD
+    hasMPI = commPy.Get_size() > 1
+    MAIN_PROCESS = commPy.Get_rank() == 0
+except ImportError:
+    MPIpy = None
+    commPy = None
+    hasMPI = False
+    MAIN_PROCESS = True
+
+MPI = None
+_print = getVerbosePrinter(MAIN_PROCESS, flush=True)
+#############################################
+
+
+_print('\n\n\n')
+_print('-----------------------------------------')
+_print('=========================================')
+_print('>>>> A PROGRAM FOR THE SIMULATION OF <<<<')
+_print('>>>>   CHARGE MIGRATION USING DMRG   <<<<')
+_print('=========================================')
+_print('-----------------------------------------')
+_print('')    
+
+
+
+t_start = time.time()
+try:
+    logbook = util_logbook.read(inputs['prev_logbook'])
+    _print('Starting logbook from a previous one found in ' + inputs['prev_logbook'])
+except:
+    logbook = {}
+    _print('Starting logbook from scratch')
+logbook.update({'t_start':t_start})
+
+
+#==== Git information ====#
+try:
+    # Ref. : https://stackoverflow.com/questions/26134026/how-to-get-the-current-checked-out-git-branch-name-through-pygit2
+    exec_path = os.path.realpath(__file__)
+    from pygit2 import Repository
+    repo = Repository(exec_path)
+    print_section('Git version')
+    _print('  * Branch = ', repo.head.shorthand)
+    _print('  * Revision version = ', repo.head.target)
+except:
+    _print('Git version information is not available - it will be ignored.')
+
+    
+if hasMPI:
+    commPy.Barrier()
+    print(f"# A warm welcome from MPI on {socket.gethostname()} with size {commPy.Get_size()} and rank {commPy.Get_rank()}",
+              flush=True)
+    commPy.Barrier()
+        
+
+WDIR = os.getcwd()
+logbook.update({'workdir':WDIR})
+logbook.update({'myname':inputs['prefix'] + '.lb'})    
+if inputs['dump_inputs']:
+    print('\nInput parameters:')
+    for kw in inputs:
+        _print('  ', kw, ' = ', inputs[kw])
+    print(' ')
+    
+
+#==== Print process-related status ====#
+_print('block2 build = ', block2.__file__)
+_print('Using MPI? ', yn_bools[hasMPI])
+def_n_threads = 1
+n_threads = int(os.environ.get("OMP_NUM_THREADS", def_n_threads))
+_print("Number of threads = ", n_threads)
+_print('OMP_PLACES = ', os.environ.get("OMP_PLACES"))
+_print('OMP_PROC_BIND = ', os.environ.get("OMP_PROC_BIND"))
+
+#==== Scratch folder ====#
+if inputs['scratch'] == 'DEFINE_LATER':
+    scratch = WDIR + '/' + inputs['prefix'] + '.tmp'
+    scratch = os.environ.get("ITDDMRG_TMPDIR", scratch)
+else:
+    scratch = inputs['scratch']
+logbook.update({'scratch':scratch})
+_print('Scratch directory = ', scratch)
+_print('Complex MPS type = ', inputs['complex_MPS_type'])
+
+    
+#==== Setting up the system ====#
+nelCore = 2 * inputs['nCore']
+tot_nq = get_tot_nuc_charge(extract_atoms(inputs['atoms']))
+charge = tot_nq - nelCore - inputs['nelCAS']
+_print('Total nuclear charge = ', tot_nq)
+_print('System charge = ', charge)
+mol = gto.M(atom=inputs['atoms'], basis=inputs['basis'],
+            ecp=inputs['ecp'], symmetry=inputs['group'],
+            charge=charge, spin=inputs['twos'])
+mol.build()
+n_mo = mol.nao
+pg = mol.groupname.lower()
+_print('Atomic coordinates (in angstrom) = ', inputs['atoms'])
+_print('Point group = ', pg)
+_print('Total number of electrons = ', sum(mol.nelec))
+_print('AO basis set = ', inputs['basis'])
+_print('Number of AO bases = ', mol.nao)
+_print('Number of MO bases = ', n_mo)
+logbook.update({'nelCore':nelCore, 'point_group':pg})
+
+
+#==== Specification of the CAS ====#
+nvir = n_mo - (inputs['nCore'] + inputs['nCAS'])
+nsites = inputs['nCAS']
+if MAIN_PROCESS:
+    assert nelCore + inputs['nelCAS'] == sum(mol.nelec)
+    assert inputs['nCore'] + inputs['nCAS'] <= n_mo
+    if inputs['mrci'] is not None:
+        assert isinstance(inputs['mrci'], dict)
+_print('Number of core orbitals = ', inputs['nCore'])
+_print('Number of CAS orbitals (CAS electrons) = %d (%d)' %
+       (inputs['nCAS'], inputs['nelCAS']))
+_print('Number of virtual orbitals = ', nvir)
+if inputs['mrci'] is not None:
+    sorder = ['single', 'single-double', 'single-double-triple'][inputs['mrci']['order']-1]
+    _print('MRCI is active:')
+    _print('   * order = ', sorder)
+    _print('   * no. of orbitals in the second active space = ', inputs['mrci']['nactive2'])
+logbook.update({'nvir':nvir, 'nsites':nsites})
+
+
+#==== Obtain the site orbitals ====#
+if MAIN_PROCESS:
+    if inputs['orb_path'] is defvals.def_orb_path:
+        #==== Run HF on the molecule ====#
+        _print('>>>> Running Hartree-Fock to get the site orbitals <<<<')
+        mf = scf.RHF(mol)
+        mf.kernel()
+        orbs = mf.mo_coeff
+        _print('2-e integral shape, size = ', mf._eri.shape, mf._eri.size)
+    else:
+        #==== Load the orbitals ====#
+        _print('Loading site orbitals from ' + inputs['orb_path'] + '.')
+        orbs = np.load(inputs['orb_path'])
+        assert len(orbs.shape) == 2, 'The loaded Hartree-Fock orbitals ' + \
+               'array must be a two-dimensional array (a matrix).'
+        assert (orbs.shape[0] == n_mo and
+                orbs.shape[1] <= n_mo), \
+                'The shape of the loaded orbital is ' + str(orbs.shape) + \
+                ', while the number of AO from the chosen basis is ' + \
+                str(n_mo) + '.'
+    orbs_shape = orbs.shape
+    print_section('The coefficients and symmetries of core orbitals')
+    analyze(mol, orbs[:,0:inputs['nCore']])
+    print_section('The coefficients and symmetries of active (site) orbitals')
+    analyze(mol, orbs[:,inputs['nCore']:inputs['nCore']+inputs['nCAS']])
+    print_section('The coefficients and symmetries of unused orbitals')
+    analyze(mol, orbs[:,inputs['nCore']+inputs['nCAS']:])
+
+
+    #==== Get the integrals ====#
+    h1e, g2e, ecore = \
+         get_CAS_ints(mol, inputs['nCore'], inputs['nCAS'], inputs['nelCAS'], orbs, True)
+    g2e = ao2mo.restore('s8', g2e, inputs['nCAS'])   # For some reason 's4' for the first parameter results in an error later on inside FCIDUMP.initialize_su2.
+    h1eshape = h1e.shape
+    g2eshape = g2e.shape
+
+    #==== Modify the integrals for static field ====#
+    h1e_kick = None
+    if inputs["static_electric_field"] is not None or inputs["delta_kick"] is not None:
+        origin = np.asarray(inputs["field_origin"], dtype=float)
+
+        with mol.with_common_orig(origin):
+            r_ao = mol.intor("int1e_r", comp=3)
+
+        i0 = inputs["nCore"]
+        i1 = inputs["nCore"] + inputs["nCAS"]
+        c_act = orbs[:, i0:i1]
+
+        if inputs["static_electric_field"] is not None:
+            field = np.asarray(inputs["static_electric_field"], dtype=float)
+            assert field.shape == (3,)
+            h_field_ao = np.einsum("x,xij->ij", field, r_ao)
+            h1e = h1e + c_act.T @ h_field_ao @ c_act
+
+            if inputs["include_core_field_energy"] and inputs["nCore"] > 0:
+                c_core = orbs[:, :inputs["nCore"]]
+                ecore += 2.0 * np.trace(c_core.T @ h_field_ao @ c_core)
+
+        if inputs["delta_kick"] is not None:
+            kick = np.asarray(inputs["delta_kick"], dtype=float)
+            assert kick.shape == (3,)
+            h_kick_ao = np.einsum("x,xij->ij", kick, r_ao)
+            h1e_kick = c_act.T @ h_kick_ao @ c_act
+
+    #==== Get the symmetries ====#
+    molpro_osym, molpro_wsym = \
+        get_syms(mol, inputs['wfn_sym'], inputs['nCore'], inputs['nCAS'], orbs)
+    logbook.update({'molpro_osym':molpro_osym, 'molpro_wsym':molpro_wsym})
+else:
+    orbs = h1e = g2e = None
+    orbs_shape = h1eshape = g2eshape = None
+    ecore = None
+    molpro_osym = molpro_wsym = None
+
+    
+#==== Distribute some data to other MPI processes ====#
+if hasMPI:
+    orbs_shape = commPy.bcast(orbs_shape, root = 0)
+    h1eshape = commPy.bcast(h1eshape, root = 0)
+    has_delta_kick = commPy.bcast(h1e_kick is not None if MAIN_PROCESS else None, root=0)
+    g2eshape = commPy.bcast(g2eshape, root = 0)
+    if not MAIN_PROCESS:
+        orbs = np.empty(orbs_shape, dtype=np.float64)
+        h1e = np.empty(h1eshape, dtype=np.float64)
+        if has_delta_kick:
+            h1e_kick = np.empty(h1eshape, dtype=np.float64)
+        g2e = np.empty(g2eshape, dtype=np.float64)
+    if has_delta_kick: 
+            commPy.Bcast([h1e_kick, MPIpy.DOUBLE], root=0)
+    else:
+        h1e_kick = None
+    commPy.Bcast([orbs, MPIpy.DOUBLE], root=0)
+    commPy.Bcast([h1e, MPIpy.DOUBLE], root=0)
+    commPy.Bcast([g2e, MPIpy.DOUBLE], root=0)
+    ecore = commPy.bcast(ecore, root = 0)
+    molpro_osym = commPy.bcast(molpro_osym, root = 0)
+    molpro_wsym = commPy.bcast(molpro_wsym, root = 0)
+
+    
+#==== Reorder orbitals ====#
+if MAIN_PROCESS:
+    #==== Genetic, Fiedler, or path name ====#
+    if isinstance(inputs['orb_order'], str):
+        #==== Genetic or Fiedler ====#
+        if inputs['orb_order'] == 'genetic' or inputs['orb_order'] == 'fiedler':
+            _print('Orbital ordering will be computed by the program using ' +
+                   inputs['orb_order'] + ' algorithm.')
+            if inputs['orb_order'] == 'genetic':
+                ord_method = 'gaopt'
+            elif inputs['orb_order'] == 'fiedler':
+                ord_method = 'fiedler'        
+            if inputs['mrci'] is not None:
+                print_mrci_warning()
+                i1 = inputs['nCore']
+                i2 = inputs['nCore'] + inputs['nCAS']
+                re_idx = orbital_reorder_mrci(ord_method, mol,
+                                              inputs['nCAS']-inputs['mrci']['nactive2'],
+                                              inputs['mrci']['nactive2'], inputs['nelCAS'],
+                                              inputs['mrci']['order'], orbs[:,i1:i2])
+            else:
+                re_idx = orbital_reorder(h1e, g2e, method=ord_method)
+        #==== Load from an .npy file ====#
+        else:
+            _print('Loading orbital ordering from ' + inputs['orb_order'] + '.')
+            re_idx = np.load(inputs['orb_order'])
+
+    #==== Linear or circular ====#
+    elif isinstance(inputs['orb_order'], dict):
+        i1 = inputs['nCore']
+        i2 = inputs['nCore'] + inputs['nCAS']
+        
+        #==== Linear ordering ====#
+        if inputs['orb_order']['type'] == 'linear':
+            # orb_order = {'type':'linear', 'direction':(x1,y1,z1)}
+            _print('Orbital ordering will be computed using the linear method')
+            _print('  * direction = ', inputs['orb_order']['direction'])
+            uv = inputs['orb_order']['direction']
+            if inputs['mrci'] is not None:
+                re_idx = \
+                    orbital_reorder_mrci_dip(mol, orbs[:,i1:i2], uv,
+                                        inputs['nCAS']-inputs['mrci']['nactive2'],
+                                        inputs['mrci']['nactive2'], inputs['verbose_lvl'])
+            else:
+                re_idx = \
+                    orbital_reorder_dip(mol, orbs[:,i1:i2], uv, inputs['verbose_lvl'])
+        #==== Circular ordering ====#
+        elif inputs['orb_order']['type'] == 'circular':
+            # orb_order = {'type':'circular', 'plane':((x1,y1,z1), (x2,y2,z2), (x3,y3,z3)),
+            #             'method':'angle'|'dipole', 'anchor':('first'|'last',i)}
+            # method = ordering method, 'angle' or 'dipole'. Optional.
+            # anchor = a tuple that controls which orbital is at the first or last site, the
+            #          input format is ('first'|'last', i) where i is the 1-base orbital
+            #          index. Optional.
+            cmethod = inputs['orb_order'].get('method', 'angle')
+            anchor = inputs['orb_order'].get('anchor', None)
+            _print('Orbital ordering will be computed using the circular method:')
+            _print('  * plane points = ', inputs['orb_order']['plane'])
+            _print('  * sorting method = ', cmethod)
+            _print('  * anchor = ', anchor)
+            if inputs['mrci'] is not None:
+                re_idx = \
+                    orbital_reorder_mrci_circ()
+            else:
+                re_idx = \
+                    orbital_reorder_circ(mol, orbs[:,i1:i2], np.array(inputs['orb_order']['plane']),
+                                         cmethod, anchor, inputs['verbose_lvl'])
+            
+    #==== List, tuple, or array of integers (explicitly typed) ====#
+    elif isinstance(inputs['orb_order'], (np.ndarray, list, tuple)):
+        assert all(isinstance(i, (int, np.int8, np.int16, np.int32, np.int64))
+                   for i in inputs['orb_order'])
+        _print('Orbital ordering is provided directly in the input.')
+        re_idx = np.array(inputs['orb_order'])
+        
+    else:
+        raise ValueError('The specified value for \'orb_order\', ' + inputs['orb_order'] +
+                         ', is not recognized.')
+            
+    
+    _print('\nCAS orbitals ordering = ', re_idx)
+    if not all(isinstance(idx, (int, np.int8, np.int16, np.int32, np.int64)) \
+               for idx in re_idx):
+        raise ValueError('All elements of the ordering array must be an integer.')
+
+    #==== Save orbital ordering ====#
+    np.save(WDIR + '/' + inputs['prefix'] + '.ord', re_idx)
+    
+    logbook.update({'orb_order_id':re_idx})
+else:
+    re_idx = None
+
+if hasMPI:
+    re_idx = commPy.bcast(re_idx if MAIN_PROCESS else None, root=0)
+
+
+#==== Initiate the Hamiltonian MPO ====#
+_print(f'Memory allocation = {inputs["memory"]} Bytes')
+obj = MYTDDMRG(mol, inputs['nelCAS'], scratch, inputs['memory'],
+               omp_threads=n_threads, mpi=hasMPI)
+MPI = obj.mpi
+obj.verbose = inputs['verbose_lvl']
+obj.init_hamiltonian(pg, nsites, inputs['nelCAS'], inputs['twos'], molpro_wsym, 
+                     molpro_osym, e_core=ecore, h1e=h1e, g2e=g2e, orbs=orbs, tol=1E-11, 
+                     idx=re_idx, save_fcidump='FCIDUMP', h1e_kick=h1e_kick)
+
+
+#==== Print symmetries ====#
+_print('Number of sites = %d (identical to the number of CAS orbitals)' % nsites)
+swap_pg = getattr(PointGroup, "swap_" + pg)
+osym = list(map(swap_pg, molpro_osym))
+_print('CAS orbitals symmetries = ', [s for s in osym])
+_print('CAS orbitals symmetries = ', [symm.irrep_id2name(mol.groupname, s) for s in osym])
+wsym = swap_pg(molpro_wsym)
+_print('MPS symmetry = ', symm.irrep_id2name(mol.groupname, wsym))
+_print('Core energy = %12.8f Hartree' % ecore)
+logbook.update({'pyscf_osym':osym, 'pyscf_wsym':wsym})
+logbook.update(inputs)
+
+
+if inputs['do_groundstate']:
+    #==== Run the DMRG ground state iterations ====#
+    _print('\n\n\n')
+    _print('-------------------------------------')
+    _print('=====================================')
+    _print('>>>> GROUND STATE DMRG ITERATION <<<<')
+    _print('=====================================')
+    _print('-------------------------------------')
+    _print('')
+    _print('Ground state bond dimensions schedule = ', inputs['D_gs'])
+    _print('Ground state noises schedule = ', inputs['gs_noise'])
+    _print('Ground state Davidson thresholds schedule = ', inputs['gs_dav_tols'])
+    if inputs['gs_outmps_dir'] == 'DEFINE_LATER':
+        inputs['gs_outmps_dir'] = scratch
+        kw = 'gs_outmps_dir'
+        if inputs['dump_inputs']:
+            _print('  ', kw, ' = ', inputs[kw])
+    logbook = obj.dmrg(logbook, inputs['D_gs'], inputs['gs_noise'], inputs['gs_steps'],
+                       inputs['gs_dav_tols'], inputs['gs_conv_tol'], inputs['gs_cutoff'], 
+                       inputs['gs_occs'], inputs['gs_bias'], inputs['gs_outmps_dir'], 
+                       inputs['gs_outmps_fname'], inputs['save_gs_1pdm'], inputs['flip_spectrum'],
+                       inputs['mrci'], inputs['gs_inmps_dir'], inputs['gs_inmps_fname'],
+                       inputs['gs_out_cpx'])
+    _print('\n')
+logbook.update(inputs)
+
+
+if inputs['do_annihilate']:    
+    #==== Apply the annihilation operator ====#
+    _print('\n\n\n')
+    _print('----------------------------------------------')
+    _print('==============================================')
+    _print('>>>> APPLICATION OF ANNIHILATION OPERATOR <<<<')
+    _print('==============================================')
+    _print('----------------------------------------------')
+    _print('')
+    #OLD D_ann_fit = [d + inputs['ann_fit_margin'] for d in inputs['D_gs']]
+    _print('Fitting bond dimensions schedule = ', inputs['D_ann_fit'])
+    _print('Fitting noises schedule = ', inputs['ann_fit_noise'])
+    if inputs['ann_inmps_dir'] == 'DEFINE_LATER':
+        inputs['ann_inmps_dir'] = scratch
+        kw = 'ann_inmps_dir'
+        if inputs['dump_inputs']:
+            _print('  ', kw, ' = ', inputs[kw])
+    if inputs['ann_outmps_dir'] == 'DEFINE_LATER':
+        inputs['ann_outmps_dir'] = scratch
+        kw = 'ann_outmps_dir'
+        if inputs['dump_inputs']:
+            _print('  ', kw, ' = ', inputs[kw])
+    logbook = \
+        obj.annihilate(logbook,
+                       inputs['ann_orb'], inputs['D_ann_fit'], inputs['ann_fit_noise'], 
+                       inputs['ann_fit_tol'], inputs['ann_fit_steps'], pg, inputs['ann_inmps_dir'], 
+                       inputs['ann_inmps_fname'], inputs['ann_outmps_dir'], inputs['ann_outmps_fname'], 
+                       inputs['ann_orb_thr'], inputs['ann_sp'], inputs['ann_fit_cutoff'], 
+                       inputs['ann_fit_occs'], inputs['ann_fit_bias'], inputs['normalize_annout'], 
+                       inputs['save_ann_1pdm'], inputs['ann_out_singlet_embed'], inputs['ann_out_cpx'],
+                       inputs['mrci'])
+    _print('\n')
+logbook.update(inputs) 
+
+
+#==== Run the DMRG TD-propagation ====#
+if inputs['do_timeevo']:
+    _print('\n\n\n')
+    _print('-----------------------------------')
+    _print('===================================')
+    _print('>>>> TIME EVOLUTION OF THE MPS <<<<')
+    _print('===================================')
+    _print('-----------------------------------')
+    _print('')
+
+    #OLDif inputs['sample_dir'] == 'DEFINE_LATER':
+    #OLD    inputs['sample_dir'] = WDIR + '/' + inputs['prefix'] + '.sample'
+    if inputs['te_method'] == 'tdvp':
+        method = TETypes.TangentSpace
+    elif inputs['te_method'] == 'rk4':
+        method = TETypes.RK4
+    elif inputs['te_method'] == 'rk4pp':
+        method = TETypes.RK4PP
+    else:
+        raise ValueError('The possible choice for te_method is either \'tdvp\', \'rk4\' ' +
+                         'or \'rk4pp\', while the current value is \'' + inputs['te_method'] +
+                         '\'.')
+    if inputs['te_inmps_dir'] == 'DEFINE_LATER':
+        inputs['te_inmps_dir'] = scratch
+        kw = 'te_inmps_dir'
+        if inputs['dump_inputs']:
+            _print('  ', kw, ' = ', inputs[kw])
+
+    assert inputs['te_save_mps']=='overwrite' or inputs['te_save_mps']=='sampled' or \
+        inputs['te_save_mps']=='no'
+    if inputs['te_save_mps'] == 'sampled':
+        print_warning('The option to retain the instantaneous MPS at each sampling time ' +
+                      'has been turned on. Be warned that these MPSs might take up a \n' +
+                      'lot of storage space. This option is usually used if you want ' +
+                      'to use these instantaneous MPS for later analyses that are not \n' +
+                      'available already in this program and for which the use of 1RDM ' +
+                      'alone is not enough. If that is not your plan, using \n' +
+                      '\'overwrite\' is recommended.')
+    
+    if inputs['mps_act0_dir'] == 'DEFINE_LATER': 
+        inputs['mps_act0_dir'] = inputs['te_inmps_dir']
+    if inputs['mps_act0_fname'] == 'DEFINE_LATER':
+        inputs['mps_act0_fname'] = inputs['te_inmps_fname']
+    if inputs['mps_act0_cpx'] == 'DEFINE_LATER':
+        inputs['mps_act0_cpx'] = inputs['te_inmps_cpx']
+    if inputs['mps_act0_multi'] == 'DEFINE_LATER':
+        inputs['mps_act0_multi'] = inputs['te_inmps_multi']
+    logbook.update(inputs)
+        
+    logbook = \
+        obj.time_propagate(logbook,
+                           inputs['te_max_D'], method, inputs['tmax'], inputs['dt'], 
+                           inputs['tinit'], inputs['te_inmps_dir'], inputs['te_inmps_fname'],
+                           inputs['te_inmps_cpx'], inputs['te_inmps_multi'], 
+                           inputs['mps_act0_dir'], inputs['mps_act0_fname'],
+                           inputs['mps_act0_cpx'], inputs['mps_act0_multi'], inputs['exp_tol'], 
+                           inputs['te_cutoff'], inputs['te_normalize'], inputs['n_sub_sweeps'],
+                           inputs['n_sub_sweeps_init'], inputs['krylov_size'], inputs['krylov_tol'],
+                           inputs['te_sample'], inputs['te_save_mps'], inputs['te_save_1pdm'],
+                           inputs['te_save_2pdm'], inputs['prefix'],
+                           inputs['save_txt'], inputs['save_npy'], inputs['te_in_singlet_embed'][0],
+                           inputs['te_in_singlet_embed'][1], inputs['mrci'], inputs['bo_pairs'])
+    _print('\n')
+
+logbook.update(inputs)
+
+
+#==== Wrapping up ====#
+t_fin = time.time()
+logbook.update({'t_final':t_fin})
+
+#==== Export the logbook ====#
+if MAIN_PROCESS:
+    util_logbook.save(logbook, logbook['myname'], True, verbose=3)   #1
+# 1) No values added to logbook will appear in the exported *.lb file beyond this point.
+#    Add all values you want to be stored in the *.lb file before this point,
+if hasMPI:
+    MPI.barrier()
+    
+
+_print('Total computational time = ' + format_timespan(t_fin-t_start, max_units=5))
+
+
+_print('\n\n\n')
+_print('--------------------------')
+_print('==========================')
+_print('>>>> PROGRAM FINISHED <<<<')
+_print('==========================')
+_print('--------------------------')
+_print('')
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#####################################################
+##################### GRAVEYARD #####################
+#####################################################
+        #OLD h1e = mol.ao2mo(mf.mo_coeff, intor='int1e_kin') + mol.ao2mo(mf.mo_coeff, intor='int1e_nuc')    # BAD, the shape of h1e is not nbas x nbas.
+        #OLD _print('h1e shape = ', h1e.shape)
+        
+        #OLD h1e = mf.mo_coeff.T @ mf.get_hcore() @ mf.mo_coeff
+        #OLD g2e_method = 2
+        #OLD if (g2e_method == 1):
+        #OLD     g2e_ = mol.intor('int2e')
+        #OLD     g2e = ao2mo.kernel(g2e_, mf.mo_coeff, aosym='s1')
+        #OLD elif (g2e_method == 2):
+        #OLD     g2e = ao2mo.kernel(mol, mf.mo_coeff, aosym='s1')
+        #OLD #g2e = mol.ao2mo(mf.mo_coeff, intor='int2e')     # BAD because one cannot specify the symmetry of the resulting integral,
+        #OLD                                                  # on the other hand, the orbital_reorder function requires no symmetry if
+        #OLD                                                  # the integrals are not tuple, which is true here (they are tuple for UHF).
+        #OLD ecore = mol.energy_nuc()
+        #OLD nsites = n_mo
+        #OLD molpro_wsym = 1
+        #OLD molpro_osym = [1] * n_mo
+#####################################################
+#####################################################
