@@ -533,6 +533,11 @@ def get_inputs(inp_file):
         inputs["static_electric_field"] = None
 
     try:
+        inputs["delta_kick"] = delta_kick
+    except NameError:
+        inputs["delta_kick"] = None
+
+    try:
         inputs["field_origin"] = field_origin
     except NameError:
         inputs["field_origin"] = (0.0, 0.0, 0.0)

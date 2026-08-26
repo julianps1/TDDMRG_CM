@@ -312,7 +312,8 @@ class MYTDDMRG:
 
     #################################################
     def init_hamiltonian(self, pg, n_sites, n_elec, twos, isym, orb_sym, e_core, 
-                         h1e, g2e, orbs, tol=1E-13, idx=None, save_fcidump=None):
+                         h1e, g2e, orbs, tol=1E-13, idx=None, save_fcidump=None,
+                         h1e_kick=None):
         """
         Initialize integrals using h1e, g2e, etc.
         n_elec : The number of electrons within the sites. This means, if there are core
@@ -440,6 +441,11 @@ class MYTDDMRG:
                                      orb_sym=b2.VectorUInt8(map(swap_pg, orb_sym)))
         self.te_mpo = self.b2driver.get_qc_mpo(h1e=h1e, g2e=g2e, ecore=e_core, reorder=idx,
                                             iprint=1)
+        self.kick_mpo = None
+        if h1e_kick is not None:
+            self.kick_mpo = self.b2driver.get_qc_mpo(
+                h1e=h1e_kick, g2e=np.zeros_like(g2e), ecore=0.0,
+                reorder=idx, iprint=1)
         #self.te_mpo = self.b2driver.get_conventional_qc_mpo(self.fcidump,
         #                                                 MPOAlgorithmTypes.Conventional)
         #_print('TE_MPO algo type = ', MPOAlgorithmTypes.Conventional)
@@ -1853,6 +1859,24 @@ class MYTDDMRG:
             _print('Algorithm type = 2-site')
         elif cmps.dot == 1:
             _print('Algorithm type = 1-site')
+
+        #==== Apply an instantaneous delta kick ====#
+        if self.kick_mpo is not None:
+            if method == b2.TETypes.RK4:
+                kick_te_type = 'rk4'
+            elif method == b2.TETypes.TangentSpace:
+                kick_te_type = 'tdvp'
+            else:
+                raise NotImplementedError(
+                    'Delta kicks are supported only with RK4 and TDVP time evolution.')
+            _print('Applying initial delta kick.')
+            cmps = self.b2driver.td_dmrg(
+                mpo=self.kick_mpo, ket=cmps, delta_t=1j, n_steps=1,
+                final_mps_tag='mps_t', te_type=kick_te_type,
+                bond_dims=[max_bond_dim], n_sub_sweeps=n_sub_sweeps,
+                normalize_mps=normalize, hermitian=True, iprint=verbosity,
+                cutoff=cutoff, krylov_conv_thrd=krylov_tol,
+                krylov_subspace_size=krylov_size)
 
 
         #==== Initial setups for autocorrelation ====#
