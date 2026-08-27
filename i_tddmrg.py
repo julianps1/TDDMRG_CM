@@ -1698,8 +1698,7 @@ class MYTDDMRG:
             mps, mps_info, _ = \
                 loadMPSfromDir(inmps_dir, inmps_name, inmps_cpx, mps_type, idMPO,
                                cached_contraction=True, MPI=self.mpi, 
-                               prule=self.prule if self.mpi is not None else None,
-                               driver=self.b2driver)
+                               prule=self.prule if self.mpi is not None else None)
 
             
             #==== Determine the type of t=0 MPS for autocorrelation ====#
@@ -1738,8 +1737,7 @@ class MYTDDMRG:
                         mps_act0_dir, mps_act0_name, mps_act0_cpx,
                         mps_act0_type, idMPO, cached_contraction=True,
                         MPI=self.mpi,
-                        prule=self.prule if self.mpi is not None else None,
-                        driver=self.b2driver)
+                        prule=self.prule if self.mpi is not None else None)
             #ipsh('After loading mps')
         else:
             raise NotImplementedError('Use loadv2.')

@@ -300,7 +300,7 @@ def loadMPSfromDir_OLD(mps_info: brs.MPSInfo,  mpsSaveDir:str, MPI:MPICommunicat
 #################################################
 def loadMPSfromDir(mpsSaveDir:str, mpstag:str, complex_mps:bool, mps_type:dict, impo, 
                    ref_center=0, cached_contraction:bool=True, MPI:MPICommunicator=None, 
-                   prule=None, driver=None) -> bs.MPS | bs.MultiMPS:
+                   prule=None) -> bs.MPS | bs.MultiMPS:
 
     if MPI is not None:
         assert prule is not None, 'prule is required when the MPI input is not None.'
@@ -338,6 +338,7 @@ def loadMPSfromDir(mpsSaveDir:str, mpstag:str, complex_mps:bool, mps_type:dict, 
 
     #==== Duplicate MPS files in mpsSaveDir to the ====#
     #==== scratch obtained from the MPSInfo object ====#
+    mps_info.load_mutable()
     if mps_type['type'] == 'multi':
         mps = bs.MultiMPS(mps_info)          # 1)
     else:
@@ -348,8 +349,7 @@ def loadMPSfromDir(mpsSaveDir:str, mpstag:str, complex_mps:bool, mps_type:dict, 
         if MPI is not None:
             MPI.barrier()
     # NOTES:
-    # 1) At this point, mps is just a dummy MPS object used to get
-    #    the path to the scratch folder.
+    # 1) The MPS object is used here to obtain its scratch filenames.
     if mps_type['type'] == 'multi':
         for iroot in range(0, mps_type['nroots']):
             fnam = mps.get_wfn_filename(iroot, "")
@@ -360,27 +360,6 @@ def loadMPSfromDir(mpsSaveDir:str, mpstag:str, complex_mps:bool, mps_type:dict, 
                 MPI.barrier()
 
     
-    #==== Construct the actual MPS object ====#
-    use_driver_load = driver is not None and mps_type['type'] in ('normal', 'multi')
-    if use_driver_load:
-        if MPI is None or MPI.rank == 0:
-            shutil.copyfile(
-                inmps_path,
-                driver.scratch + "/%s-mps_info.bin" % mps_info.tag)
-        if MPI is not None:
-            MPI.barrier()
-        mps = driver.load_mps(
-            mps_info.tag, nroots=mps_type.get('nroots', 1))
-    elif mps_type['type'] == 'multi':
-        mps = bs.MultiMPS(mps_info).deep_copy(mps_info.tag)
-    else:
-        mps = bs.MPS(mps_info).deep_copy(mps_info.tag)
-    if MPI is not None:
-        MPI.barrier()
-    mps_info = mps.info
-    mps_info.load_mutable()
-
-
     #==== Take care of and adjust the max bond dimension ====#
     max_bdim = max([x.n_states_total for x in mps_info.left_dims])
     if mps_info.bond_dim < max_bdim:
@@ -389,6 +368,7 @@ def loadMPSfromDir(mpsSaveDir:str, mpstag:str, complex_mps:bool, mps_type:dict, 
     if mps_info.bond_dim < max_bdim:
         mps_info.bond_dim = max_bdim
     mps.load_data()
+    mps.load_mutable()
     if MPI is not None:
         MPI.barrier()
 
