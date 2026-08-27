@@ -1677,7 +1677,10 @@ class MYTDDMRG:
         #==== Load the initial MPS ====#
         loadv2 = True
         if loadv2:
-            idMPO = self.b2driver.get_identity_mpo(add_ident=False)
+            idMPO = bs.SimplifiedMPO(
+                bs.IdentityMPO(self.hamil), bs.RuleQC(), True, True)
+            if self.mpi is not None:
+                idMPO = bs.ParallelMPO(idMPO, self.identrule)
 
             #==== Determine initial MPS type (normal, multi, or MRCI) ====#
             mps_type = {}
@@ -1765,7 +1768,7 @@ class MYTDDMRG:
         idN.cached_contraction = False
         idN.fused_contraction_rotation = True
         idN.save_environments = False
-        idN.init_environments(self.verbose >= 3)
+        idN.init_environments(False)
         nrm = bs.Expect(idN, mps.info.bond_dim, mps.info.bond_dim)
         nrm.iprint = max(self.verbose - 1, 0)
         nrm_ = nrm.solve(False, mps.center != 0)
