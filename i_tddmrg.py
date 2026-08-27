@@ -433,11 +433,8 @@ class MYTDDMRG:
         if spin_symmetry == 'su2': symm_type = [SymmetryTypes.SU2]
         elif spin_symmetry == 'sz': symm_type = [SymmetryTypes.SZ]
         if comp == 'full': symm_type += [SymmetryTypes.CPX]
-        mps_dir = os.environ.get(
-            'ITDDMRG_MPSDIR',
-            os.path.join(os.getcwd(), os.path.basename(self.scratch) + '.mps'))
         self.b2driver = DMRGDriver(
-            scratch=self.scratch, mps_dir=mps_dir, symm_type=symm_type,
+            scratch=self.scratch, symm_type=symm_type,
             stack_mem=4 << 30, n_threads=56, mpi=self.mpi is not None)
         self.mpi = self.b2driver.mpi
         if self.mpi is not None:
@@ -1680,9 +1677,7 @@ class MYTDDMRG:
         #==== Load the initial MPS ====#
         loadv2 = True
         if loadv2:
-            idMPO = bs.SimplifiedMPO(bs.IdentityMPO(self.hamil), bs.RuleQC(), True, True)
-            if self.mpi is not None:
-                idMPO = bs.ParallelMPO(idMPO, self.identrule)
+            idMPO = self.b2driver.get_identity_mpo(add_ident=False)
 
             #==== Determine initial MPS type (normal, multi, or MRCI) ====#
             mps_type = {}
@@ -1729,13 +1724,22 @@ class MYTDDMRG:
                 else:
                     mps_act0_type['type'] = 'normal'
 
-            _print('Loading t=0 MPS for autocorrelation info from ' + mps_act0_dir + 
-                   "/" + mps_act0_name)
-            mps_act0, _, _ = \
-                loadMPSfromDir(mps_act0_dir, mps_act0_name, mps_act0_cpx, 
-                               mps_act0_type, idMPO, cached_contraction=True, 
-                               MPI=self.mpi, prule=self.prule if self.mpi is
-                               not None else None, driver=self.b2driver)
+            if (os.path.abspath(mps_act0_dir) == os.path.abspath(inmps_dir)
+                    and mps_act0_name == inmps_name
+                    and mps_act0_cpx == inmps_cpx
+                    and mps_act0_multi == inmps_multi):
+                _print('Reusing the initial MPS as the t=0 autocorrelation MPS.')
+                mps_act0 = mps
+            else:
+                _print('Loading t=0 MPS for autocorrelation info from ' +
+                       mps_act0_dir + "/" + mps_act0_name)
+                mps_act0, _, _ = \
+                    loadMPSfromDir(
+                        mps_act0_dir, mps_act0_name, mps_act0_cpx,
+                        mps_act0_type, idMPO, cached_contraction=True,
+                        MPI=self.mpi,
+                        prule=self.prule if self.mpi is not None else None,
+                        driver=self.b2driver)
             #ipsh('After loading mps')
         else:
             raise NotImplementedError('Use loadv2.')
@@ -1757,22 +1761,9 @@ class MYTDDMRG:
         
         
         #==== Initial norm ====#
-        idMPO = bs.SimplifiedMPO(
-            bs.IdentityMPO(self.hamil), bs.RuleQC(), True, True)
-        if self.mpi is not None:
-            idMPO = bs.ParallelMPO(idMPO, self.identrule)
         print_MPO_bond_dims(idMPO, 'Identity_2')
-        idN = bs.MovingEnvironment(idMPO, mps, mps, "norm_in")
-        idN.delayed_contraction = b2.OpNamesSet.normal_ops()
-        idN.cached_contraction = False
-        idN.fused_contraction_rotation = True
-        idN.save_environments = False
-        idN.init_environments(self.verbose >= 3)
-        nrm = bs.Expect(idN, mps.info.bond_dim, mps.info.bond_dim)
-        nrm.iprint = max(self.verbose - 1, 0)
-        nrm_ = nrm.solve(False, mps.center != 0)
-        if self.mpi is not None:
-            self.mpi.barrier()
+        nrm_ = self.b2driver.expectation(
+            mps, idMPO, mps, iprint=max(self.verbose - 1, 0))
         _print(f'Initial MPS norm = Re: {nrm_.real:11.8f}, Im: {nrm_.imag:11.8f}')
 
         
@@ -1786,62 +1777,25 @@ class MYTDDMRG:
                         verbose_lvl=self.verbose-1)
 
 
-        if self.mpi is not None:
-            self.mpi.barrier()
-
         #==== Make the input MPS complex when using hybrid complex ====#
         if inmps_cpx:
             # Just duplicate the input MPS if it is complex, regardless of
             # whether it is of multi MPS or normal MPS type. The comp type
             # does not matter either here.
-            if self.mpi is None or self.mpi.rank == 0:
-                cmps = mps.deep_copy('mps_t')
+            cmps = mps.deep_copy('mps_t')
         else:
             # If the input MPS is real (impliying comp=False), then use a
             # multi MPS to transform it to a complex multi MPS.
-            if self.mpi is None or self.mpi.rank == 0:
-                cmps = bs.MultiMPS.make_complex(mps, "mps_t")
-        if self.mpi is not None:
-            if self.mpi.rank == 0:
-                cmps.info.save_data(self.scratch + '/mps_t-info')
-            self.mpi.barrier()
-            if self.mpi.rank != 0:
-                cmps_info = (brs.MultiMPSInfo(0) if inmps_multi or not inmps_cpx
-                             else brs.MPSInfo(0))
-                cmps_info.load_data(self.scratch + '/mps_t-info')
-                cmps_info.load_mutable()
-                cmps = (bs.MultiMPS(cmps_info) if inmps_multi or not inmps_cpx
-                        else bs.MPS(cmps_info))
-                cmps.load_data()
-                cmps.load_mutable()
-            self.mpi.barrier()
+            cmps = bs.MultiMPS.make_complex(mps, "mps_t")
         _print('Initial canonical form (ortho. center) = ' +
                f'{cmps.canonical_form} ({cmps.center})')
 
         #==== Make the MPS for autocorrelation's t0 ====#
         #====   complex when using hybrid complex   ====#
         if mps_act0_cpx:
-            if self.mpi is None or self.mpi.rank == 0:
-                cmps_act0 = mps_act0.deep_copy('mps_act0')
+            cmps_act0 = mps_act0.deep_copy('mps_act0')
         else:
-            if self.mpi is None or self.mpi.rank == 0:
-                cmps_act0 = bs.MultiMPS.make_complex(mps_act0, "mps_act0")
-        if self.mpi is not None:
-            if self.mpi.rank == 0:
-                cmps_act0.info.save_data(self.scratch + '/mps_act0-info')
-            self.mpi.barrier()
-            if self.mpi.rank != 0:
-                cmps_act0_info = (brs.MultiMPSInfo(0)
-                                  if mps_act0_multi or not mps_act0_cpx
-                                  else brs.MPSInfo(0))
-                cmps_act0_info.load_data(self.scratch + '/mps_act0-info')
-                cmps_act0_info.load_mutable()
-                cmps_act0 = (bs.MultiMPS(cmps_act0_info)
-                             if mps_act0_multi or not mps_act0_cpx
-                             else bs.MPS(cmps_act0_info))
-                cmps_act0.load_data()
-                cmps_act0.load_mutable()
-            self.mpi.barrier()
+            cmps_act0 = bs.MultiMPS.make_complex(mps_act0, "mps_act0")
 
         #==== Take care of the algorithm type (1- or 2- site) ====#
         if mps.dot != 1: # change to 2dot
@@ -1856,8 +1810,6 @@ class MYTDDMRG:
             cmps_act0.dot = 2
             cmps.save_data()
             cmps_act0.save_data()
-            if self.mpi is not None:
-                self.mpi.barrier()
             #ipsh('After checking dot')
         if cmps.dot == 2:
             _print('Algorithm type = 2-site')
