@@ -325,6 +325,19 @@ class MYTDDMRG:
 
         #==== Initialize self.fcidump ====#
         assert self.fcidump is None
+        from pyblock2.driver.core import DMRGDriver, SymmetryTypes, MPOAlgorithmTypes
+        if spin_symmetry == 'su2': symm_type = [SymmetryTypes.SU2]
+        elif spin_symmetry == 'sz': symm_type = [SymmetryTypes.SZ]
+        if comp == 'full': symm_type += [SymmetryTypes.CPX]
+        self.b2driver = DMRGDriver(
+            scratch=self.scratch, symm_type=symm_type,
+            stack_mem=4 << 30, n_threads=56, mpi=self.mpi is not None)
+        self.mpi = self.b2driver.mpi
+        if self.mpi is not None:
+            self.prule = bs.ParallelRuleQC(self.mpi)
+            self.pdmrule = bs.ParallelRuleNPDMQC(self.mpi)
+            self.siterule = bs.ParallelRuleSiteQC(self.mpi)
+            self.identrule = bs.ParallelRuleIdentity(self.mpi)
         self.fcidump = bx.FCIDUMP()
         self.groupname = pg
         assert n_elec == self.nel_site, \
@@ -400,6 +413,12 @@ class MYTDDMRG:
         #    orbital symmetries AFTER REORDERING.
 
 
+        #==== Initialize the new interface system ====#
+        self.b2driver.initialize_system(
+            n_sites=n_sites, n_elec=n_elec, spin=twos,
+            singlet_embedding=False, pg_irrep=self.wfn_sym,
+            orb_sym=b2.VectorUInt8(map(swap_pg, orb_sym)))
+
         #==== Construct the Hamiltonian MPO ====#
         vacuum = SX(0)
         self.target = SX(n_elec, twos, swap_pg(isym))
@@ -428,34 +447,14 @@ class MYTDDMRG:
 
                 
 
-        #==== New interface ====#
-        from pyblock2.driver.core import DMRGDriver, SymmetryTypes, MPOAlgorithmTypes
-        if spin_symmetry == 'su2': symm_type = [SymmetryTypes.SU2]
-        elif spin_symmetry == 'sz': symm_type = [SymmetryTypes.SZ]
-        if comp == 'full': symm_type += [SymmetryTypes.CPX]
-        self.b2driver = DMRGDriver(
-            scratch=self.scratch, symm_type=symm_type,
-            stack_mem=4 << 30, n_threads=56, mpi=self.mpi is not None)
-        self.mpi = self.b2driver.mpi
-        if self.mpi is not None:
-            self.prule = bs.ParallelRuleQC(self.mpi)
-            self.pdmrule = bs.ParallelRuleNPDMQC(self.mpi)
-            self.siterule = bs.ParallelRuleSiteQC(self.mpi)
-            self.identrule = bs.ParallelRuleIdentity(self.mpi)
-        swap_pg = getattr(b2.PointGroup, "swap_" + pg)
-        self.b2driver.initialize_system(n_sites=self.n_sites, n_elec=n_elec, spin=twos, 
-                                     singlet_embedding=False, pg_irrep=self.wfn_sym,
-                                     orb_sym=b2.VectorUInt8(map(swap_pg, orb_sym)))
+        #==== Construct the time-evolution MPOs ====#
         self.te_mpo = self.b2driver.get_qc_mpo(h1e=h1e, g2e=g2e, ecore=e_core, reorder=idx,
-                                            iprint=1)
+                                            algo_type=MPOAlgorithmTypes.Conventional, iprint=1)
         self.kick_mpo = None
         if h1e_kick is not None:
             self.kick_mpo = self.b2driver.get_qc_mpo(
                 h1e=h1e_kick, g2e=np.zeros_like(g2e), ecore=0.0,
-                reorder=idx, iprint=1)
-        #self.te_mpo = self.b2driver.get_conventional_qc_mpo(self.fcidump,
-        #                                                 MPOAlgorithmTypes.Conventional)
-        #_print('TE_MPO algo type = ', MPOAlgorithmTypes.Conventional)
+                reorder=idx, algo_type=MPOAlgorithmTypes.Conventional, iprint=1)
         
         if self.mpi is not None:
             self.mpi.barrier()
