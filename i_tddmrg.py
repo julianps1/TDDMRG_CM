@@ -1760,8 +1760,17 @@ class MYTDDMRG:
         
         #==== Initial norm ====#
         print_MPO_bond_dims(idMPO, 'Identity_2')
-        nrm_ = self.b2driver.expectation(
-            mps, idMPO, mps, iprint=max(self.verbose - 1, 0))
+        idN = bs.MovingEnvironment(idMPO, mps, mps, "norm_in")
+        idN.delayed_contraction = b2.OpNamesSet.normal_ops()
+        idN.cached_contraction = False
+        idN.fused_contraction_rotation = True
+        idN.save_environments = False
+        idN.init_environments(self.verbose >= 3)
+        nrm = bs.Expect(idN, mps.info.bond_dim, mps.info.bond_dim)
+        nrm.iprint = max(self.verbose - 1, 0)
+        nrm_ = nrm.solve(False, mps.center != 0)
+        if self.mpi is not None:
+            self.mpi.barrier()
         _print(f'Initial MPS norm = Re: {nrm_.real:11.8f}, Im: {nrm_.imag:11.8f}')
 
         
