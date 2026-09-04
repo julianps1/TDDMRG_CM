@@ -9,7 +9,7 @@ def get_inputs(inp_file):
     '''
     This function returns a dictionary containing the input parameters and their values
     as key-value pairs.
-    
+
     To define a new input parameters, first decide whether this new input parameter is 
     mandatory or optional parameter. If it is a mandatory input, then simply add the 
     following line after the 'inputs = {}' below
@@ -524,6 +524,28 @@ def get_inputs(inp_file):
             inputs['ann_out_cpx'] = ann_out_cpx
         except NameError:
             inputs['ann_out_cpx'] = defvals.def_ann_out_cpx
+
+
+    #==== Add a static electric field to the Hamiltonian====#
+    try:
+        inputs["static_electric_field"] = static_electric_field
+    except NameError:
+        inputs["static_electric_field"] = None
+
+    try:
+        inputs["delta_kick"] = delta_kick
+    except NameError:
+        inputs["delta_kick"] = None
+
+    try:
+        inputs["field_origin"] = field_origin
+    except NameError:
+        inputs["field_origin"] = (0.0, 0.0, 0.0)
+
+    try:
+        inputs["include_core_field_energy"] = include_core_field_energy
+    except NameError:
+        inputs["include_core_field_energy"] = True
 
     #==== Time evolution parameters ====#
     # do_timeevo:
