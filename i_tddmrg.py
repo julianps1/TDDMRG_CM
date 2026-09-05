@@ -1880,38 +1880,39 @@ class MYTDDMRG:
 
         #==== Apply an instantaneous delta kick ====#
         if self.kick_mpo is not None:
-            _print('Applying initial delta kick as -i*kick*r |Psi>.')
+            _print('Applying centered delta kick with ground-state amplitude sqrt(1-P_exc).')
             if self.mpi is not None:
                 self.mpi.barrier()
             cmps_ref = cmps.deep_copy('mps_t_before_delta_kick')
             if self.mpi is not None:
                 self.mpi.barrier()
 
+            ref_norm = self.b2driver.expectation(cmps_ref, idMPO, cmps_ref).real
+            kick_mean = self.b2driver.expectation(
+                cmps_ref, self.kick_mpo, cmps_ref).real / ref_norm
             kick_mpo_cpx = -1j * self.kick_mpo
+            kick_mpo_cpx.const_e += 1j * kick_mean
 
-            #MPS_fitting(
-            #    cmps, cmps_ref, -1j * self.kick_mpo, [max_bond_dim],
-            #    n_sub_sweeps_init, [0.0], exp_tol, 'density_mat', cutoff,
-            #    verbose_lvl=self.verbose-1, bs_backend=bs) #Use complex fitting due to complex operator
-            
-            #NOTE: MPS_fitting was causing issues with block2 and how complex operators were passed
-            ## Just using the block2 driver's built in multiply instead
-
-            print("cmps:    ", type(cmps))
-            print("ref:     ", type(cmps_ref))
-            print("kick MPO:", type(self.kick_mpo))
-            print("id MPO:  ", type(idMPO))
-
-            print("cmps tag:", cmps.info.tag)
-            print("ref tag: ", cmps_ref.info.tag)
-
-            print("same MPS info object:", cmps.info is cmps_ref.info)
-
-            self.b2driver.multiply(cmps,idMPO,cmps_ref,
+            # Fit the excited component in the retained MPS space before measuring
+            # its weight: this avoids using an unprojected <K^2> for an MRCI MPS.
+            self.b2driver.multiply(cmps,kick_mpo_cpx,cmps_ref,
                                    n_sweeps=n_sub_sweeps_init,tol=exp_tol,
                                    bra_bond_dims=[max_bond_dim],noises=[0.0],
                                    cutoff=cutoff,iprint=max(self.verbose-1,0))
+            excited_population = self.b2driver.expectation(cmps, idMPO, cmps).real / ref_norm
+            if not 0.0 <= excited_population <= 1.0:
+                raise ValueError(f'Delta-kick excited population {excited_population} '
+                                 'is outside [0, 1]; reduce the kick strength.')
+            ground_amplitude = np.sqrt(1.0 - excited_population)
+            _print(f'Delta-kick <K> = {kick_mean:.12g}, '
+                   f'P_exc = {excited_population:.12g}, C0 = {ground_amplitude:.12g}')
 
+            # [sqrt(1-P_exc) I - i (K-<K>I)] |Psi_0>, for a normalized input.
+            kick_mpo_cpx.const_e += ground_amplitude
+            self.b2driver.multiply(cmps,kick_mpo_cpx,cmps_ref,
+                                   n_sweeps=n_sub_sweeps_init,tol=exp_tol,
+                                   bra_bond_dims=[max_bond_dim],noises=[0.0],
+                                   cutoff=cutoff,iprint=max(self.verbose-1,0))
 
             if normalize:
                 _print('Normalizing the delta-kicked MPS')
@@ -1924,8 +1925,11 @@ class MYTDDMRG:
                 assert cmps.tensors[icent] is not None
                 cmps.load_tensor(icent)
                 cmps.tensors[icent].normalize()
-                cmps.save_data()
-            cmps_ref.deallocate()
+                cmps.save_tensor(icent)
+                cmps.unload_tensor(icent)
+
+            # Use the post-kick norm for t=0 autocorrelation and saved metadata.
+            nrm_ = self.b2driver.expectation(cmps, idMPO, cmps)
 
 
         #==== Initial setups for autocorrelation ====#
