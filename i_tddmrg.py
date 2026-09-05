@@ -174,6 +174,8 @@ class MYTDDMRG:
         self.mpo_orig = None
         self.print_statistics = print_statistics
         self.mpi = mpi
+        self.memory = int(memory)
+        self.omp_threads = int(omp_threads)
         ## self.mpi = MPI
         
         self.delayed_contraction = delayed_contraction
@@ -312,7 +314,8 @@ class MYTDDMRG:
 
     #################################################
     def init_hamiltonian(self, pg, n_sites, n_elec, twos, isym, orb_sym, e_core, 
-                         h1e, g2e, orbs, tol=1E-13, idx=None, save_fcidump=None):
+                         h1e, g2e, orbs, tol=1E-13, idx=None, save_fcidump=None,
+                         h1e_kick=None):
         """
         Initialize integrals using h1e, g2e, etc.
         n_elec : The number of electrons within the sites. This means, if there are core
@@ -324,6 +327,24 @@ class MYTDDMRG:
 
         #==== Initialize self.fcidump ====#
         assert self.fcidump is None
+        from pyblock2.driver.core import (
+            DMRGDriver, SymmetryTypes, MPOAlgorithmTypes, ParallelTypes)
+        if spin_symmetry == 'su2': symm_type = [SymmetryTypes.SU2]
+        elif spin_symmetry == 'sz': symm_type = [SymmetryTypes.SZ]
+        if comp == 'full': symm_type += [SymmetryTypes.CPX]
+        self.b2driver = DMRGDriver(
+            scratch=self.scratch, symm_type=symm_type, clean_scratch=False,
+            stack_mem=self.memory, n_threads=self.omp_threads, mpi=self.mpi is not None) #NOTE: Why were these hardcoded 4 << 30 and 56??
+        #self.mpi = self.b2driver.mpi #NOTE: Some issue with flag overwrite?
+        if self.mpi is not None:
+            self.prule = bs.ParallelRuleQC(self.mpi)
+            # Match block2main: build the full MPO on every rank, then
+            # distribute its QC operators through ParallelRuleQC.
+            self.b2driver.prule = self.prule
+            #self.pdmrule = bs.ParallelRuleNPDMQC(self.mpi)
+            self.pdmrule = bs.ParallelRulePDM1QC(self.mpi) #NOTE: How implemented in block2 core.py; better scalability
+            self.siterule = bs.ParallelRuleSiteQC(self.mpi)
+            self.identrule = bs.ParallelRuleIdentity(self.mpi)
         self.fcidump = bx.FCIDUMP()
         self.groupname = pg
         assert n_elec == self.nel_site, \
@@ -399,6 +420,12 @@ class MYTDDMRG:
         #    orbital symmetries AFTER REORDERING.
 
 
+        #==== Initialize the new interface system ====#
+        self.b2driver.initialize_system(
+            n_sites=n_sites, n_elec=n_elec, spin=twos,
+            singlet_embedding=False, pg_irrep=self.wfn_sym,
+            orb_sym=b2.VectorUInt8(map(swap_pg, orb_sym)))
+
         #==== Construct the Hamiltonian MPO ====#
         vacuum = SX(0)
         self.target = SX(n_elec, twos, swap_pg(isym))
@@ -427,30 +454,22 @@ class MYTDDMRG:
 
                 
 
-        #==== New interface ====#
-        from pyblock2.driver.core import DMRGDriver, SymmetryTypes, MPOAlgorithmTypes
-        if spin_symmetry == 'su2': symm_type = [SymmetryTypes.SU2]
-        elif spin_symmetry == 'sz': symm_type = [SymmetryTypes.SZ]
-        if comp == 'full': symm_type += [SymmetryTypes.CPX]
-        self.b2driver = DMRGDriver(scratch=self.scratch, symm_type=symm_type, stack_mem=4 << 30, 
-                                n_threads=56, mpi=self.mpi)
-        swap_pg = getattr(b2.PointGroup, "swap_" + pg)
-        self.b2driver.initialize_system(n_sites=self.n_sites, n_elec=n_elec, spin=twos, 
-                                     singlet_embedding=False, pg_irrep=self.wfn_sym,
-                                     orb_sym=b2.VectorUInt8(map(swap_pg, orb_sym)))
-        self.te_mpo = self.b2driver.get_qc_mpo(h1e=h1e, g2e=g2e, ecore=e_core, reorder=idx,
-                                            iprint=1)
-        #self.te_mpo = self.b2driver.get_conventional_qc_mpo(self.fcidump,
-        #                                                 MPOAlgorithmTypes.Conventional)
-        #_print('TE_MPO algo type = ', MPOAlgorithmTypes.Conventional)
+        #==== Construct the time-evolution MPOs ====#
+        self.te_mpo = self.b2driver.get_qc_mpo(
+            h1e=h1e, g2e=g2e, ecore=e_core, reorder=idx,
+            para_type=(ParallelTypes.Nothing if self.mpi is not None else None),
+            algo_type=MPOAlgorithmTypes.NoTransConventional, iprint=1)
+        #NOTE: With MPOAlgorithmTypes.Conventional, code is 2x slower than just running block2's file system input.
+        #####  Numerics are identical
+
+        self.kick_mpo = None
+        if h1e_kick is not None:
+            self.kick_mpo = self.b2driver.get_qc_mpo(
+                h1e=h1e_kick, g2e=np.zeros_like(g2e), ecore=0.0,
+                reorder=idx,
+                para_type=(ParallelTypes.Nothing if self.mpi is not None else None),
+                algo_type=MPOAlgorithmTypes.NoTransConventional, iprint=1)
         
-        if self.mpi is not None:
-            self.te_mpo = bs.ParallelMPO(self.te_mpo, self.prule)
-
-
-            
-
-            
         if self.mpi is not None:
             self.mpi.barrier()
     #################################################
@@ -725,8 +744,10 @@ class MYTDDMRG:
             mps.random_canonicalize()
             
             mps.save_mutable()
-            mps.deallocate()
             mps_info.save_mutable()
+            if self.mpi is not None:
+                self.mpi.barrier()
+            mps.deallocate()
             mps_info.deallocate_mutable()
         
 
@@ -833,8 +854,14 @@ class MYTDDMRG:
         _print('')
         _print('Saving the ground state MPS files under ' + outmps_dir)
         if outmps_dir != self.scratch:
-            b2tools.mkDir(outmps_dir)
-        mps_info.save_data(outmps_dir + "/" + outmps_name)
+            if self.mpi is None or self.mpi.rank == 0:
+                b2tools.mkDir(outmps_dir)
+            if self.mpi is not None:
+                self.mpi.barrier()
+        if self.mpi is None or self.mpi.rank == 0:
+            mps_info.save_data(outmps_dir + "/" + outmps_name)
+        if self.mpi is not None:
+            self.mpi.barrier()
         saveMPStoDir(mps, outmps_dir, self.mpi)
         _print('Output ground state max. bond dimension = ', mps.info.bond_dim)
         if save_1pdm:
@@ -1206,13 +1233,18 @@ class MYTDDMRG:
 
 
         #==== Initialization of output MPS ====#
-        rket_info.save_data(self.scratch + "/" + outmps_name)
+        if self.mpi is None or self.mpi.rank == 0:
+            rket_info.save_data(self.scratch + "/" + outmps_name)
+        if self.mpi is not None:
+            self.mpi.barrier()
         rkets = bs.MPS(self.n_sites, mps.center, 2)
         rkets.initialize(rket_info)
         rkets.random_canonicalize()
         rkets.save_mutable()
-        rkets.deallocate()
         rket_info.save_mutable()
+        if self.mpi is not None:
+            self.mpi.barrier()
+        rkets.deallocate()
         rket_info.deallocate_mutable()
 
         #OLD if mo_coeff is None:
@@ -1323,8 +1355,15 @@ class MYTDDMRG:
             init_target, init_multip = rkets.info.target, rkets.info.target.multiplicity
             init_form, init_center = rkets.canonical_form, rkets.center
             rkets = trans_to_singlet_embed(rkets, rkets.info.tag, self.prule)
+            if self.mpi is not None:
+                self.mpi.barrier()
             rkets.save_data()
-            rkets.info.save_data(self.scratch + "/" + outmps_name)
+            if self.mpi is not None:
+                self.mpi.barrier()
+            if self.mpi is None or self.mpi.rank == 0:
+                rkets.info.save_data(self.scratch + "/" + outmps_name)
+            if self.mpi is not None:
+                self.mpi.barrier()
             _print('')
             _print('The output MPS is transformed to a singlet embedded MPS.')
             _print('Quantum number information with singlet embedding:')
@@ -1352,8 +1391,14 @@ class MYTDDMRG:
         #==== Save the output MPS ====#
         _print('')
         if outmps_dir != self.scratch:
-            b2tools.mkDir(outmps_dir)
-        rkets.info.save_data(outmps_dir + "/" + outmps_name)
+            if self.mpi is None or self.mpi.rank == 0:
+                b2tools.mkDir(outmps_dir)
+            if self.mpi is not None:
+                self.mpi.barrier()
+        if self.mpi is None or self.mpi.rank == 0:
+            rkets.info.save_data(outmps_dir + "/" + outmps_name)
+        if self.mpi is not None:
+            self.mpi.barrier()
         _print('Saving output MPS files under ' + outmps_dir)
         saveMPStoDir(rkets, outmps_dir, self.mpi)
         if save_1pdm:
@@ -1580,7 +1625,7 @@ class MYTDDMRG:
         if self.mpi is not None:
             if self.mpi.rank == 0:
                 if save_mps == 'overwrite': b2tools.mkDir(mps_dir_ow)
-                self.mpi.barrier()
+            self.mpi.barrier()
         else:
             if save_mps == 'overwrite': b2tools.mkDir(mps_dir_ow)
             
@@ -1671,9 +1716,13 @@ class MYTDDMRG:
         #==== Load the initial MPS ====#
         loadv2 = True
         if loadv2:
-            idMPO = bs.SimplifiedMPO(bs.IdentityMPO(self.hamil), bs.RuleQC(), True, True)
+            ## Keep the bond-one identity replicated on each rank.  Its
+            ## contractions are inexpensive and do not require MPI collectives.
+            idMPO = bs.SimplifiedMPO(bs.IdentityMPO(self.hamil), bs.Rule())
+            #idMPO = self.b2driver.get_identity_mpo()
             if self.mpi is not None:
                 idMPO = bs.ParallelMPO(idMPO, self.identrule)
+
 
             #==== Determine initial MPS type (normal, multi, or MRCI) ====#
             mps_type = {}
@@ -1719,13 +1768,21 @@ class MYTDDMRG:
                 else:
                     mps_act0_type['type'] = 'normal'
 
-            _print('Loading t=0 MPS for autocorrelation info from ' + mps_act0_dir + 
-                   "/" + mps_act0_name)
-            mps_act0, _, _ = \
-                loadMPSfromDir(mps_act0_dir, mps_act0_name, mps_act0_cpx, 
-                               mps_act0_type, idMPO, cached_contraction=True, 
-                               MPI=self.mpi, prule=self.prule if self.mpi is
-                               not None else None)
+            if (os.path.abspath(mps_act0_dir) == os.path.abspath(inmps_dir)
+                    and mps_act0_name == inmps_name
+                    and mps_act0_cpx == inmps_cpx
+                    and mps_act0_multi == inmps_multi):
+                _print('Reusing the initial MPS as the t=0 autocorrelation MPS.')
+                mps_act0 = mps
+            else:
+                _print('Loading t=0 MPS for autocorrelation info from ' +
+                       mps_act0_dir + "/" + mps_act0_name)
+                mps_act0, _, _ = \
+                    loadMPSfromDir(
+                        mps_act0_dir, mps_act0_name, mps_act0_cpx,
+                        mps_act0_type, idMPO, cached_contraction=True,
+                        MPI=self.mpi,
+                        prule=self.prule if self.mpi is not None else None)
             #ipsh('After loading mps')
         else:
             raise NotImplementedError('Use loadv2.')
@@ -1733,8 +1790,6 @@ class MYTDDMRG:
             mps_info = brs.MPSInfo(0)
             mps_info.load_data(inmps_path)
             mps = loadMPSfromDir_OLD(mps_info, inmps_dir, self.mpi)
-
-            
         #==== Singlet embedding ====#
         if in_singlet_embed:
             _print('The input MPS is a singlet embedded MPS.')
@@ -1747,23 +1802,21 @@ class MYTDDMRG:
         
         
         #==== Initial norm ====#
-        idMPO = bs.SimplifiedMPO(bs.IdentityMPO(self.hamil), bs.RuleQC(), True, True)
         print_MPO_bond_dims(idMPO, 'Identity_2')
-        if self.mpi is not None:
-            idMPO = bs.ParallelMPO(idMPO, self.identrule)
-        mps_n = mps.deep_copy('mps_norm')                 # 3)
-        idN = bs.MovingEnvironment(idMPO, mps_n, mps_n, "norm_in")
-        idN.init_environments()   # NOTE: Why does it have to be here instead of between 'idMe =' and 'acorr =' lines.
-        if inmps_cpx and inmps_multi:
-            nrm = bs.ComplexExpect(idN, mps_n.info.bond_dim, mps_n.info.bond_dim)
-        else:
-            nrm = bs.Expect(idN, mps_n.info.bond_dim, mps_n.info.bond_dim)
-        nrm_ = nrm.solve(False)
+    #    idN = bs.MovingEnvironment(idMPO, mps, mps, "norm_in")
+    #    idN.delayed_contraction = b2.OpNamesSet.normal_ops()
+    #    idN.cached_contraction = False
+    #    idN.fused_contraction_rotation = True
+    #    idN.save_environments = False
+    #    idN.init_environments(False)
+    #    nrm = bs.Expect(idN, mps.info.bond_dim, mps.info.bond_dim)
+    #    nrm.iprint = max(self.verbose - 1, 0)
+    #    nrm_ = nrm.solve(False, mps.center != 0)
+        nrm_ = self.b2driver.expectation(mps, idMPO, mps, iprint=max(self.verbose -1, 0))
+
+        #if self.mpi is not None:
+        #    self.mpi.barrier()
         _print(f'Initial MPS norm = Re: {nrm_.real:11.8f}, Im: {nrm_.imag:11.8f}')
-        # 3) We duplicate mps here to a new identical mps_n rather than using the former
-        #    because the norm calculation above changed the properties of mps such that
-        #    the overlap with initial mps (mps_act0 below) is zero in the beginning, which
-        #    should have been unity.
 
         
         #==== If a change of bond dimension of the initial MPS is requested ====#
@@ -1781,7 +1834,11 @@ class MYTDDMRG:
             # Just duplicate the input MPS if it is complex, regardless of
             # whether it is of multi MPS or normal MPS type. The comp type
             # does not matter either here.
+            if self.mpi is not None:
+                self.mpi.barrier()
             cmps = mps.deep_copy('mps_t')
+            if self.mpi is not None:
+                self.mpi.barrier()
         else:
             # If the input MPS is real (impliying comp=False), then use a
             # multi MPS to transform it to a complex multi MPS.
@@ -1792,15 +1849,16 @@ class MYTDDMRG:
         #==== Make the MPS for autocorrelation's t0 ====#
         #====   complex when using hybrid complex   ====#
         if mps_act0_cpx:
+            if self.mpi is not None:
+                self.mpi.barrier()
             cmps_act0 = mps_act0.deep_copy('mps_act0')
+            if self.mpi is not None:
+                self.mpi.barrier()
         else:
             cmps_act0 = bs.MultiMPS.make_complex(mps_act0, "mps_act0")
 
-
         #==== Take care of the algorithm type (1- or 2- site) ====#
         if mps.dot != 1: # change to 2dot
-            cmps.load_data()
-            cmps_act0.load_data()
             if comp == 'hybrid':
                 cmps.canonical_form = 'M' + cmps.canonical_form[1:]
                 cmps_act0.canonical_form = 'M' + cmps_act0.canonical_form[1:]
@@ -1808,20 +1866,78 @@ class MYTDDMRG:
                 print('mps_t0 canform = ', cmps_act0.canonical_form)
             cmps.dot = 2
             cmps_act0.dot = 2
+            if self.mpi is not None:
+                self.mpi.barrier()
             cmps.save_data()
             cmps_act0.save_data()
+            if self.mpi is not None:
+                self.mpi.barrier()
             #ipsh('After checking dot')
         if cmps.dot == 2:
             _print('Algorithm type = 2-site')
         elif cmps.dot == 1:
             _print('Algorithm type = 1-site')
 
+        #==== Apply an instantaneous delta kick ====#
+        if self.kick_mpo is not None:
+            _print('Applying centered delta kick with ground-state amplitude sqrt(1-P_exc).')
+            if self.mpi is not None:
+                self.mpi.barrier()
+            cmps_ref = cmps.deep_copy('mps_t_before_delta_kick')
+            if self.mpi is not None:
+                self.mpi.barrier()
+
+            ref_norm = self.b2driver.expectation(cmps_ref, idMPO, cmps_ref).real
+            kick_mean = self.b2driver.expectation(
+                cmps_ref, self.kick_mpo, cmps_ref).real / ref_norm
+            kick_mpo_cpx = -1j * self.kick_mpo
+            kick_mpo_cpx.const_e += 1j * kick_mean
+
+            # Fit the excited component in the retained MPS space before measuring
+            # its weight: this avoids using an unprojected <K^2> for an MRCI MPS.
+            self.b2driver.multiply(cmps,kick_mpo_cpx,cmps_ref,
+                                   n_sweeps=n_sub_sweeps_init,tol=exp_tol,
+                                   bra_bond_dims=[max_bond_dim],noises=[0.0],
+                                   cutoff=cutoff,iprint=max(self.verbose-1,0))
+            excited_population = self.b2driver.expectation(cmps, idMPO, cmps).real / ref_norm
+            if not 0.0 <= excited_population <= 1.0:
+                raise ValueError(f'Delta-kick excited population {excited_population} '
+                                 'is outside [0, 1]; reduce the kick strength.')
+            ground_amplitude = np.sqrt(1.0 - excited_population)
+            _print(f'Delta-kick <K> = {kick_mean:.12g}, '
+                   f'P_exc = {excited_population:.12g}, C0 = {ground_amplitude:.12g}')
+
+            # [sqrt(1-P_exc) I - i (K-<K>I)] |Psi_0>, for a normalized input.
+            kick_mpo_cpx.const_e += ground_amplitude
+            self.b2driver.multiply(cmps,kick_mpo_cpx,cmps_ref,
+                                   n_sweeps=n_sub_sweeps_init,tol=exp_tol,
+                                   bra_bond_dims=[max_bond_dim],noises=[0.0],
+                                   cutoff=cutoff,iprint=max(self.verbose-1,0))
+
+            if normalize:
+                _print('Normalizing the delta-kicked MPS')
+                icent = cmps.center
+                if cmps.dot == 2:
+                    if cmps.center == cmps.n_sites-2:
+                        icent += 1
+                    elif cmps.center == 0:
+                        pass
+                assert cmps.tensors[icent] is not None
+                cmps.load_tensor(icent)
+                cmps.tensors[icent].normalize()
+                cmps.save_tensor(icent)
+                cmps.unload_tensor(icent)
+
+            # Use the post-kick norm for t=0 autocorrelation and saved metadata.
+            nrm_ = self.b2driver.expectation(cmps, idMPO, cmps)
+
 
         #==== Initial setups for autocorrelation ====#
-        idME = bs.MovingEnvironment(idMPO, cmps_act0, cmps, "acorr")
+        #idME = bs.MovingEnvironment(idMPO, cmps_act0, cmps, "acorr")
             
         
         #==== Initial setups for time evolution ====#
+        te_iprint = min(verbosity, 2)
         #ipsh()
         #me = bs.MovingEnvironment(mpo, cmps, cmps, "TE")
         me = bs.MovingEnvironment(self.te_mpo, cmps, cmps, "TE")
@@ -1854,7 +1970,7 @@ class MYTDDMRG:
             te = bs.TDDMRG(me, b2.VectorUBond([max_bond_dim]))
             te.n_sub_sweeps = n_sub_sweeps_init
         te.cutoff = cutoff                    # for tiny systems, this is important
-        te.iprint = verbosity
+        te.iprint = te_iprint
         if method != b2.TETypes.RK4PP:
             te.normalize_mps = normalize
         te.hermitian = True       # bcause CPX
@@ -1869,8 +1985,9 @@ class MYTDDMRG:
         if t_sample is not None:
             issampled = [False] * len(t_sample)
         if save_npy:
-            np.save('./' + prefix + '.t', ts)
-            if t_sample is not None: np.save('./'+prefix+'.ts', t_sample)
+            if self.mpi is None or self.mpi.rank == 0:
+                np.save('./' + prefix + '.t', ts)
+                if t_sample is not None: np.save('./'+prefix+'.ts', t_sample)
         i_sp = 0
         #ipsh()
         for it, tt in enumerate(ts):
@@ -1922,18 +2039,18 @@ class MYTDDMRG:
                 _print('This is the starting time point, nothing happened yet.')
                         
             #==== Autocorrelation and norm ====#
-            idME.init_environments()   # NOTE: Why does it have to be here instead of between 'idMe =' and 'acorr =' lines.
-            if comp == 'hybrid':
-                acorr = brs.ComplexExpect(idME, max_bond_dim, max_bond_dim)
-            elif comp == 'full':
-                acorr = bs.Expect(idME, max_bond_dim, max_bond_dim)
+           # idME.init_environments()   # NOTE: Why does it have to be here instead of between 'idMe =' and 'acorr =' lines.
+           # if comp == 'hybrid':
+           #     acorr = brs.ComplexExpect(idME, max_bond_dim, max_bond_dim)
+           # elif comp == 'full':
+           #     acorr = bs.Expect(idME, max_bond_dim, max_bond_dim)
 
             #acorr_t = 1.0
-            acorr_t = acorr.solve(False)
+            acorr_t = self.b2driver.expectation(cmps_act0, idMPO, cmps, iprint=max(self.verbose - 1, 0))
             if it == 0:
                 normsqs = nrm_.real    # abs(acorr_t)
             elif it > 0:
-                normsqs = te.normsqs[0]
+                normsqs = te.normsqs[-1] #NOTE: Should this be uses the last norm?
             acorr_t = acorr_t / np.sqrt(normsqs)
                             
             #==== 2t autocorrelation ====#
@@ -1975,7 +2092,7 @@ class MYTDDMRG:
                 if self.mpi is not None:
                     if self.mpi.rank == 0:
                         b2tools.mkDir(save_dir)
-                        self.mpi.barrier()
+                    self.mpi.barrier()
                 else:
                     b2tools.mkDir(save_dir)
 
@@ -2010,7 +2127,8 @@ class MYTDDMRG:
 
                 #==== Save 1PDM ====#
                 if save_1pdm or save_1pdm_probe or save_1pdm_end:
-                    np.save(save_dir+'/1pdm', dm)
+                    if self.mpi is None or self.mpi.rank == 0:
+                        np.save(save_dir+'/1pdm', dm)
                     
                 #==== Save time info ====#
                 if r_end:
