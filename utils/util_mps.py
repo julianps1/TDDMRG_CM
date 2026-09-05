@@ -89,26 +89,28 @@ def print_MPO_bond_dims(mpo, name=''):
 #################################################
 def MPS_fitting(fitket, mps, rmpo, fit_bond_dims, fit_nsteps, fit_noises, 
                 fit_conv_tol, decomp_type, cutoff, lmpo=None, fit_margin=None, 
-                noise_type='reduced_perturb', delay_contract=True, verbose_lvl=1):
+                noise_type='reduced_perturb', delay_contract=True, verbose_lvl=1, bs_backend=None):
 
+    if bs_backend is None:
+        bs_backend = bs
     #==== Construct the LHS and RHS Moving Environment objects ====#
     if lmpo is None:
         lme = None
     else:
-        lme = bs.MovingEnvironment(lmpo, fitket, fitket, "PERT")
-        lme.init_environments(False)
+        lme = bs_backend.MovingEnvironment(lmpo, fitket, fitket, "PERT")
         if delay_contract:
             lme.delayed_contraction = b2.OpNamesSet.normal_ops()
+        lme.init_environments(False)
     #fordebug rme = MovingEnvironment(lmpo, mps, mps, "RHS")
-    rme = bs.MovingEnvironment(rmpo, fitket, mps, "RHS")
-    rme.init_environments(False)
+    rme = bs_backend.MovingEnvironment(rmpo, fitket, mps, "RHS")
     if delay_contract:
         rme.delayed_contraction = b2.OpNamesSet.normal_ops()
-        
+    rme.cached_contraction = (lme is None)    
+    rme.init_environments(False)
     #==== Begin MPS fitting ====#
     if fit_margin == None:
         fit_margin = max(int(mps.info.bond_dim / 10.0), 100)
-    fit = bs.Linear(lme, rme, b2.VectorUBond(fit_bond_dims),
+    fit = bs_backend.Linear(lme, rme, b2.VectorUBond(fit_bond_dims),
                     b2.VectorUBond([mps.info.bond_dim + fit_margin]),
                     b2.VectorDouble(fit_noises))
     
