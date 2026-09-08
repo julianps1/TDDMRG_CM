@@ -465,7 +465,7 @@ class MYTDDMRG:
         self.kick_mpo = None
         if h1e_kick is not None:
             self.kick_mpo = self.b2driver.get_qc_mpo(
-                h1e=h1e_kick, g2e=np.zeros_like(g2e), ecore=0.0,
+                h1e=-1j * h1e_kick, g2e=np.zeros_like(g2e), ecore=0.0,
                 reorder=idx,
                 para_type=(ParallelTypes.Nothing if self.mpi is not None else None),
                 algo_type=MPOAlgorithmTypes.NoTransConventional, iprint=1)
@@ -1316,7 +1316,7 @@ class MYTDDMRG:
                f'{rkets.canonical_form} ({rkets.center})')
         logbook.update({'ann:energy':energy, 'ann:canonical_form':rkets.canonical_form,
                         'ann:center':rkets.center})
-        dm1 = self.get_one_pdm(True, rkets)
+        dm1 = self.get_one_pdm(comp=='full', rkets)
         _print('Occupations after annihilation:')
         if isinstance(aorb, int):
             self.print_occupation_table(dm1, aorb)
@@ -1495,9 +1495,9 @@ class MYTDDMRG:
         t = time.perf_counter()
 
         ref_norm = self.b2driver.expectation(mps, idMPO_, mps).real
-        kick_mean = self.b2driver.expectation(
-            mps, self.kick_mpo, mps).real / ref_norm
-        kick_mpo_cpx = -1j * self.kick_mpo
+        kick_mean = -self.b2driver.expectation(
+            mps, self.kick_mpo, mps).imag / ref_norm
+        kick_mpo_cpx = self.kick_mpo
         kick_mpo_cpx.const_e += 1j * kick_mean
 
         self.b2driver.multiply(rkets, kick_mpo_cpx, cmps_ref,
@@ -1547,7 +1547,7 @@ class MYTDDMRG:
                         'delta_kick:canonical_form':rkets.canonical_form,
                         'delta_kick:center':rkets.center})
 
-        dm1 = self.get_one_pdm(comp=='full', rkets)
+        dm1 = self.get_one_pdm(True, rkets)
         _print('Occupations after delta kick:')
         self.print_occupation_table(dm1, None)
 
