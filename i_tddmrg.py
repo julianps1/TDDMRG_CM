@@ -465,7 +465,7 @@ class MYTDDMRG:
         self.kick_mpo = None
         if h1e_kick is not None:
             self.kick_mpo = self.b2driver.get_qc_mpo(
-                h1e=h1e_kick, g2e=np.zeros_like(g2e), ecore=0.0,
+                h1e=-1j * h1e_kick, g2e=np.zeros_like(g2e), ecore=0.0,
                 reorder=idx,
                 para_type=(ParallelTypes.Nothing if self.mpi is not None else None),
                 algo_type=MPOAlgorithmTypes.NoTransConventional, iprint=1)
@@ -1890,11 +1890,53 @@ class MYTDDMRG:
             ref_norm = self.b2driver.expectation(cmps_ref, idMPO, cmps_ref).real
             kick_mean = self.b2driver.expectation(
                 cmps_ref, self.kick_mpo, cmps_ref).real / ref_norm
-            kick_mpo_cpx = -1j * self.kick_mpo
+            kick_mpo_cpx = self.kick_mpo
             kick_mpo_cpx.const_e += 1j * kick_mean
+
+            rank = self.mpi.rank if self.mpi is not None else 0
+            size = self.mpi.size if self.mpi is not None else 1
+
+            for printing_rank in range(size):
+                if self.mpi is not None:
+                    self.mpi.barrier()
+
+                if rank == printing_rank:
+                    for name, state in (("bra", cmps), ("ket", cmps_ref)):
+                        print(
+                            f"[rank {rank}] {name}: tag={state.info.tag}, "
+                            f"center={state.center}, dot={state.dot}, "
+                            f"canonical={state.canonical_form}",
+                            flush=True,
+                        )
+                        for site in range(state.center, min(state.center + 2, state.n_sites)):
+                            if state.tensors[site] is None:
+                                print(f"[rank {rank}] {name}[{site}]: None", flush=True)
+                                continue
+
+                            state.load_tensor(site)
+                            print(
+                                f"[rank {rank}] {name}[{site}]: "
+                                f"is_wavefunction={state.tensors[site].info.is_wavefunction}",
+                                flush=True,
+                            )
+                            state.unload_tensor(site)
+
+            if self.mpi is not None:
+                self.mpi.barrier()
 
             # Fit the excited component in the retained MPS space before measuring
             # its weight: this avoids using an unprojected <K^2> for an MRCI MPS.
+
+            rank = self.mpi.rank if self.mpi is not None else 0
+            for name, mpo in (
+                ("original kick", self.kick_mpo),
+                ("scaled kick", kick_mpo_cpx),
+            ):
+                print(
+                    f"[rank {rank}] {name}: type={type(mpo)}, "
+                    f"parallel_type={mpo.get_parallel_type()}",
+                    flush=True,
+                )
             self.b2driver.multiply(cmps,kick_mpo_cpx,cmps_ref,
                                    n_sweeps=n_sub_sweeps_init,tol=exp_tol,
                                    bra_bond_dims=[max_bond_dim],noises=[0.0],
