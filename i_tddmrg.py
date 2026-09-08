@@ -1415,6 +1415,166 @@ class MYTDDMRG:
 
 
     #################################################
+    def delta_kick(self, logbook_in, fit_bond_dims, fit_noises, fit_conv_tol, fit_n_steps,
+                   inmps_dir0=None, inmps_name='GS_MPS_INFO', outmps_dir0=None,
+                   outmps_name='DK_MPS_INFO', cutoff=1E-14, occs=None, bias=1.0,
+                   outmps_normal=True, save_1pdm=False, mrci_info=None):
+        logbook = logbook_in.copy()
+
+        if self.kick_mpo is None:
+            raise ValueError('The delta_kick input must be given when do_delta_kick is True.')
+
+        if self.mpi is not None:
+            self.mpi.barrier()
+
+        if inmps_dir0 is None:
+            inmps_dir = self.scratch
+        else:
+            inmps_dir = inmps_dir0
+        if outmps_dir0 is None:
+            outmps_dir = self.scratch
+        else:
+            outmps_dir = outmps_dir0
+
+        idMPO_ = bs.SimplifiedMPO(bs.IdentityMPO(self.hamil), bs.RuleQC(), True, True)
+        if self.mpi is not None:
+            idMPO_ = bs.ParallelMPO(idMPO_, self.identrule)
+
+        if self.mpo_orig is None:
+            mpo = bs.MPOQC(self.hamil, b2.QCTypes.Conventional)
+            mpo = bs.SimplifiedMPO(mpo, bs.RuleQC(), True, True,
+                                   b2.OpNamesSet((b2.OpNames.R, b2.OpNames.RD)))
+            self.mpo_orig = mpo
+        else:
+            mpo = self.mpo_orig
+        if self.mpi is not None:
+            mpo = bs.ParallelMPO(mpo, self.prule)
+
+        complex_mps = (comp == 'full')
+        if mrci_info is not None:
+            mps_type = {'type':'mrci', 'nactive2':mrci_info['nactive2'], 'order':mrci_info['order'],
+                        'n_sites':self.n_sites, 'vacuum':self.hamil.vacuum, 'target':self.target,
+                        'basis':self.hamil.basis}
+        else:
+            mps_type = {'type':'normal'}
+        mps, mps_info, _ = \
+                loadMPSfromDir(inmps_dir, inmps_name, complex_mps, mps_type, idMPO_,
+                               cached_contraction=True, MPI=self.mpi,
+                               prule=self.prule if self.mpi is not None else None)
+        _print('Input MPS max. bond dimension = ', mps.info.bond_dim)
+        assert mps_info.target.n == self.nel_site, \
+            'The number of active space electrons from the quantum number label does ' + \
+            'not mathc the one specified in the input file.'
+
+        dm0 = self.get_one_pdm(comp=='full', mps)
+        _print('Occupations before delta kick:')
+        self.print_occupation_table(dm0, None)
+
+        _print('Quantum number information:')
+        _print(' - Input MPS = ', self.target)
+        _print(' - Input MPS multiplicity = ', self.target.multiplicity)
+        _print(' - Output MPS = ', self.target)
+        _print(' - Output MPS multiplicity = ', self.target.multiplicity)
+        logbook.update({'delta_kick:qnumber:n':self.target.n,
+                        'delta_kick:qnumber:mult':self.target.multiplicity,
+                        'delta_kick:qnumber:pg':self.target.pg})
+
+        logbook.update({'delta_kick:tag':'DKET_DELTA_KICK'})
+
+        if comp == 'hybrid':
+            cmps_ref = bs.MultiMPS.make_complex(mps, "mps_delta_kick_ref")
+            rkets = bs.MultiMPS.make_complex(mps, "DKET_DELTA_KICK")
+        else:
+            cmps_ref = mps.deep_copy('mps_delta_kick_ref')
+            rkets = mps.deep_copy('DKET_DELTA_KICK')
+        if self.mpi is not None:
+            self.mpi.barrier()
+
+        if self.verbose >= 2:
+            _print('>>> START : Applying the delta kick <<<')
+        t = time.perf_counter()
+
+        ref_norm = self.b2driver.expectation(mps, idMPO_, mps).real
+        kick_mean = -self.b2driver.expectation(
+            mps, self.kick_mpo, mps).imag / ref_norm
+        kick_mpo_cpx = self.kick_mpo
+        kick_mpo_cpx.const_e += 1j * kick_mean
+
+        self.b2driver.multiply(rkets, kick_mpo_cpx, cmps_ref,
+                               n_sweeps=fit_n_steps, tol=fit_conv_tol,
+                               bra_bond_dims=fit_bond_dims, noises=fit_noises,
+                               cutoff=cutoff, iprint=max(self.verbose-1, 0))
+        excited_population = self.b2driver.expectation(rkets, idMPO_, rkets).real / ref_norm
+        if not 0.0 <= excited_population <= 1.0:
+            raise ValueError(f'Delta-kick excited population {excited_population} '
+                             'is outside [0, 1]; reduce the kick strength.')
+        ground_amplitude = np.sqrt(1.0 - excited_population)
+        _print(f'Delta-kick <K> = {kick_mean:.12g}, '
+               f'P_exc = {excited_population:.12g}, C0 = {ground_amplitude:.12g}')
+
+        kick_mpo_cpx.const_e += ground_amplitude
+        self.b2driver.multiply(rkets, kick_mpo_cpx, cmps_ref,
+                               n_sweeps=fit_n_steps, tol=fit_conv_tol,
+                               bra_bond_dims=fit_bond_dims, noises=fit_noises,
+                               cutoff=cutoff, iprint=max(self.verbose-1, 0))
+        _print('Output MPS max. bond dimension = ', rkets.info.bond_dim)
+
+        if outmps_normal:
+            _print('Normalizing the output MPS')
+            icent = rkets.center
+            if rkets.dot == 2:
+                if rkets.center == rkets.n_sites-2:
+                    icent += 1
+                elif rkets.center == 0:
+                    pass
+            assert rkets.tensors[icent] is not None
+            rkets.load_tensor(icent)
+            rkets.tensors[icent].normalize()
+            rkets.save_tensor(icent)
+            rkets.unload_tensor(icent)
+
+        nrm_ = self.b2driver.expectation(rkets, idMPO_, rkets)
+        _print(f'Output MPS norm = Re: {nrm_.real:11.8f}, Im: {nrm_.imag:11.8f}')
+        logbook.update({'delta_kick:norm':nrm_})
+
+        energy = calc_energy_MPS(mpo, rkets, 0)
+        _print('Output MPS energy = ',
+               '(%12.8f, %12.8fj) Hartree' % (energy.real, energy.imag) if comp=='full' else
+               '%12.8f Hartree' % energy)
+        _print('Canonical form of the delta-kick output (ortho. center) = ' +
+               f'{rkets.canonical_form} ({rkets.center})')
+        logbook.update({'delta_kick:energy':energy,
+                        'delta_kick:canonical_form':rkets.canonical_form,
+                        'delta_kick:center':rkets.center})
+
+        dm1 = self.get_one_pdm(True, rkets)
+        _print('Occupations after delta kick:')
+        self.print_occupation_table(dm1, None)
+
+        if outmps_dir != self.scratch:
+            if self.mpi is None or self.mpi.rank == 0:
+                b2tools.mkDir(outmps_dir)
+            if self.mpi is not None:
+                self.mpi.barrier()
+        if self.mpi is None or self.mpi.rank == 0:
+            rkets.info.save_data(outmps_dir + "/" + outmps_name)
+        if self.mpi is not None:
+            self.mpi.barrier()
+        _print('Saving output MPS files under ' + outmps_dir)
+        saveMPStoDir(rkets, outmps_dir, self.mpi)
+        if save_1pdm:
+            _print('Saving 1PDM of the output MPS under ' + outmps_dir)
+            np.save(outmps_dir + '/DK_1pdm', dm1)
+
+        if self.verbose >= 2:
+            _print('>>> COMPLETE : Application of delta kick | Time = %.2f <<<' %
+                   (time.perf_counter() - t))
+
+        return logbook
+    #################################################
+
+
+    #################################################
     def save_time_info(self, save_dir, t, it, t_sp, i_sp, normsq, ac, save_mps,
                        save_1pdm, rs, re, ro, dm):
 
@@ -1877,102 +2037,6 @@ class MYTDDMRG:
             _print('Algorithm type = 2-site')
         elif cmps.dot == 1:
             _print('Algorithm type = 1-site')
-
-        #==== Apply an instantaneous delta kick ====#
-        if self.kick_mpo is not None:
-            _print('Applying centered delta kick with ground-state amplitude sqrt(1-P_exc).')
-            if self.mpi is not None:
-                self.mpi.barrier()
-            cmps_ref = cmps.deep_copy('mps_t_before_delta_kick')
-            if self.mpi is not None:
-                self.mpi.barrier()
-
-            ref_norm = self.b2driver.expectation(cmps_ref, idMPO, cmps_ref).real
-            kick_mean = self.b2driver.expectation(
-                cmps_ref, self.kick_mpo, cmps_ref).real / ref_norm
-            kick_mpo_cpx = self.kick_mpo
-            kick_mpo_cpx.const_e += 1j * kick_mean
-
-            rank = self.mpi.rank if self.mpi is not None else 0
-            size = self.mpi.size if self.mpi is not None else 1
-
-            for printing_rank in range(size):
-                if self.mpi is not None:
-                    self.mpi.barrier()
-
-                if rank == printing_rank:
-                    for name, state in (("bra", cmps), ("ket", cmps_ref)):
-                        print(
-                            f"[rank {rank}] {name}: tag={state.info.tag}, "
-                            f"center={state.center}, dot={state.dot}, "
-                            f"canonical={state.canonical_form}",
-                            flush=True,
-                        )
-                        for site in range(state.center, min(state.center + 2, state.n_sites)):
-                            if state.tensors[site] is None:
-                                print(f"[rank {rank}] {name}[{site}]: None", flush=True)
-                                continue
-
-                            state.load_tensor(site)
-                            print(
-                                f"[rank {rank}] {name}[{site}]: "
-                                f"is_wavefunction={state.tensors[site].info.is_wavefunction}",
-                                flush=True,
-                            )
-                            state.unload_tensor(site)
-
-            if self.mpi is not None:
-                self.mpi.barrier()
-
-            # Fit the excited component in the retained MPS space before measuring
-            # its weight: this avoids using an unprojected <K^2> for an MRCI MPS.
-
-            rank = self.mpi.rank if self.mpi is not None else 0
-            for name, mpo in (
-                ("original kick", self.kick_mpo),
-                ("scaled kick", kick_mpo_cpx),
-            ):
-                print(
-                    f"[rank {rank}] {name}: type={type(mpo)}, "
-                    f"parallel_type={mpo.get_parallel_type()}",
-                    flush=True,
-                )
-            self.b2driver.multiply(cmps,kick_mpo_cpx,cmps_ref,
-                                   n_sweeps=n_sub_sweeps_init,tol=exp_tol,
-                                   bra_bond_dims=[max_bond_dim],noises=[0.0],
-                                   cutoff=cutoff,iprint=max(self.verbose-1,0))
-            excited_population = self.b2driver.expectation(cmps, idMPO, cmps).real / ref_norm
-            if not 0.0 <= excited_population <= 1.0:
-                raise ValueError(f'Delta-kick excited population {excited_population} '
-                                 'is outside [0, 1]; reduce the kick strength.')
-            ground_amplitude = np.sqrt(1.0 - excited_population)
-            _print(f'Delta-kick <K> = {kick_mean:.12g}, '
-                   f'P_exc = {excited_population:.12g}, C0 = {ground_amplitude:.12g}')
-
-            # [sqrt(1-P_exc) I - i (K-<K>I)] |Psi_0>, for a normalized input.
-            kick_mpo_cpx.const_e += ground_amplitude
-            self.b2driver.multiply(cmps,kick_mpo_cpx,cmps_ref,
-                                   n_sweeps=n_sub_sweeps_init,tol=exp_tol,
-                                   bra_bond_dims=[max_bond_dim],noises=[0.0],
-                                   cutoff=cutoff,iprint=max(self.verbose-1,0))
-
-            if normalize:
-                _print('Normalizing the delta-kicked MPS')
-                icent = cmps.center
-                if cmps.dot == 2:
-                    if cmps.center == cmps.n_sites-2:
-                        icent += 1
-                    elif cmps.center == 0:
-                        pass
-                assert cmps.tensors[icent] is not None
-                cmps.load_tensor(icent)
-                cmps.tensors[icent].normalize()
-                cmps.save_tensor(icent)
-                cmps.unload_tensor(icent)
-
-            # Use the post-kick norm for t=0 autocorrelation and saved metadata.
-            nrm_ = self.b2driver.expectation(cmps, idMPO, cmps)
-
 
         #==== Initial setups for autocorrelation ====#
         #idME = bs.MovingEnvironment(idMPO, cmps_act0, cmps, "acorr")

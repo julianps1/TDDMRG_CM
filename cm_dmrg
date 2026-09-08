@@ -458,6 +458,40 @@ if inputs['do_annihilate']:
 logbook.update(inputs) 
 
 
+if inputs['do_delta_kick']:
+    #==== Apply the delta kick ====#
+    _print('\n\n\n')
+    _print('-----------------------------------')
+    _print('===================================')
+    _print('>>>> APPLICATION OF DELTA KICK <<<<')
+    _print('===================================')
+    _print('-----------------------------------')
+    _print('')
+    _print('Fitting bond dimensions schedule = ', inputs['D_delta_kick_fit'])
+    _print('Fitting noises schedule = ', inputs['delta_kick_fit_noise'])
+    if inputs['delta_kick_inmps_dir'] == 'DEFINE_LATER':
+        inputs['delta_kick_inmps_dir'] = scratch
+        kw = 'delta_kick_inmps_dir'
+        if inputs['dump_inputs']:
+            _print('  ', kw, ' = ', inputs[kw])
+    if inputs['delta_kick_outmps_dir'] == 'DEFINE_LATER':
+        inputs['delta_kick_outmps_dir'] = scratch
+        kw = 'delta_kick_outmps_dir'
+        if inputs['dump_inputs']:
+            _print('  ', kw, ' = ', inputs[kw])
+    logbook = \
+        obj.delta_kick(logbook,
+                       inputs['D_delta_kick_fit'], inputs['delta_kick_fit_noise'],
+                       inputs['delta_kick_fit_tol'], inputs['delta_kick_fit_steps'],
+                       inputs['delta_kick_inmps_dir'], inputs['delta_kick_inmps_fname'],
+                       inputs['delta_kick_outmps_dir'], inputs['delta_kick_outmps_fname'],
+                       inputs['delta_kick_fit_cutoff'], inputs['delta_kick_fit_occs'],
+                       inputs['delta_kick_fit_bias'], inputs['normalize_delta_kickout'],
+                       inputs['save_delta_kick_1pdm'], inputs['mrci'])
+    _print('\n')
+logbook.update(inputs)
+
+
 #==== Run the DMRG TD-propagation ====#
 if inputs['do_timeevo']:
     _print('\n\n\n')
