@@ -484,6 +484,7 @@ if inputs['do_delta_kick']:
                        inputs['D_delta_kick_fit'], inputs['delta_kick_fit_noise'],
                        inputs['delta_kick_fit_tol'], inputs['delta_kick_fit_steps'],
                        inputs['delta_kick_inmps_dir'], inputs['delta_kick_inmps_fname'],
+                       inputs['delta_kick_inmps_cpx'], inputs['delta_kick_inmps_multi'],
                        inputs['delta_kick_outmps_dir'], inputs['delta_kick_outmps_fname'],
                        inputs['delta_kick_fit_cutoff'], inputs['delta_kick_fit_occs'],
                        inputs['delta_kick_fit_bias'], inputs['normalize_delta_kickout'],

@@ -547,6 +547,16 @@ def get_inputs(inp_file):
             inputs['delta_kick_inmps_fname'] = defvals.def_delta_kick_inmps_fname
 
         try:
+            inputs['delta_kick_inmps_cpx'] = delta_kick_inmps_cpx
+        except NameError:
+            inputs['delta_kick_inmps_cpx'] = defvals.def_delta_kick_inmps_cpx
+
+        try:
+            inputs['delta_kick_inmps_multi'] = delta_kick_inmps_multi
+        except NameError:
+            inputs['delta_kick_inmps_multi'] = defvals.def_delta_kick_inmps_multi
+
+        try:
             inputs['delta_kick_outmps_dir'] = delta_kick_outmps_dir
         except NameError:
             inputs['delta_kick_outmps_dir'] = 'DEFINE_LATER'

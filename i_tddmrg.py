@@ -1416,11 +1416,14 @@ class MYTDDMRG:
 
     #################################################
     def delta_kick(self, logbook_in, fit_bond_dims, fit_noises, fit_conv_tol, fit_n_steps,
-                   inmps_dir0=None, inmps_name='GS_MPS_INFO', outmps_dir0=None,
-                   outmps_name='DK_MPS_INFO', cutoff=1E-14, occs=None, bias=1.0,
-                   outmps_normal=True, save_1pdm=False, mrci_info=None):
+                   inmps_dir0=None, inmps_name='GS_MPS_INFO', inmps_cpx=False,
+                   inmps_multi=False, outmps_dir0=None, outmps_name='DK_MPS_INFO',
+                   cutoff=1E-14, occs=None, bias=1.0, outmps_normal=True,
+                   save_1pdm=False, mrci_info=None):
         logbook = logbook_in.copy()
 
+        if comp != 'full':
+            raise ValueError('The delta kick workflow requires complex_MPS_type = \'full\'.')
         if self.kick_mpo is None:
             raise ValueError('The delta_kick input must be given when do_delta_kick is True.')
 
@@ -1435,11 +1438,19 @@ class MYTDDMRG:
             outmps_dir = self.scratch
         else:
             outmps_dir = outmps_dir0
+        if isinstance(fit_bond_dims, int):
+            fit_bond_dims = [fit_bond_dims]
+        if fit_noises is None:
+            fit_noises = [0.0]
 
+            
         idMPO_ = bs.SimplifiedMPO(bs.IdentityMPO(self.hamil), bs.RuleQC(), True, True)
         if self.mpi is not None:
             idMPO_ = bs.ParallelMPO(idMPO_, self.identrule)
 
+                
+        #==== Build Hamiltonian MPO (to provide noise ====#
+        #====      for Linear.solve down below)       ====#
         if self.mpo_orig is None:
             mpo = bs.MPOQC(self.hamil, b2.QCTypes.Conventional)
             mpo = bs.SimplifiedMPO(mpo, bs.RuleQC(), True, True,
@@ -1450,15 +1461,19 @@ class MYTDDMRG:
         if self.mpi is not None:
             mpo = bs.ParallelMPO(mpo, self.prule)
 
-        complex_mps = (comp == 'full')
+        #==== Load the input MPS ====#
         if mrci_info is not None:
+            assert not inmps_multi, 'At the moment MRCI MPS cannot be in multi MPS form.'
             mps_type = {'type':'mrci', 'nactive2':mrci_info['nactive2'], 'order':mrci_info['order'],
                         'n_sites':self.n_sites, 'vacuum':self.hamil.vacuum, 'target':self.target,
                         'basis':self.hamil.basis}
         else:
-            mps_type = {'type':'normal'}
+            if inmps_multi:
+                mps_type = {'type':'multi', 'nroots':2}
+            else:
+                mps_type = {'type':'normal'}
         mps, mps_info, _ = \
-                loadMPSfromDir(inmps_dir, inmps_name, complex_mps, mps_type, idMPO_,
+                loadMPSfromDir(inmps_dir, inmps_name, inmps_cpx, mps_type, idMPO_,
                                cached_contraction=True, MPI=self.mpi,
                                prule=self.prule if self.mpi is not None else None)
         _print('Input MPS max. bond dimension = ', mps.info.bond_dim)
@@ -1466,10 +1481,27 @@ class MYTDDMRG:
             'The number of active space electrons from the quantum number label does ' + \
             'not mathc the one specified in the input file.'
 
+
+        #==== Compute and print the initial occupations ====#
         dm0 = self.get_one_pdm(comp=='full', mps)
         _print('Occupations before delta kick:')
         self.print_occupation_table(dm0, None)
 
+        
+        #==== Begin constructing the delta-kick MPO ====#
+        rmpos = self.kick_mpo
+        
+        if self.mpi is not None:
+            self.mpi.barrier()
+        if self.verbose >= 2:
+            _print('>>> START : Applying the delta kick <<<')
+        t = time.perf_counter()
+
+
+        #==== Determine the quantum numbers of the output MPS, rkets ====#
+        rket_info = brs.MPSInfo(self.n_sites, self.hamil.vacuum, self.target,
+                                self.hamil.basis)
+        
         _print('Quantum number information:')
         _print(' - Input MPS = ', self.target)
         _print(' - Input MPS multiplicity = ', self.target.multiplicity)
@@ -1479,31 +1511,53 @@ class MYTDDMRG:
                         'delta_kick:qnumber:mult':self.target.multiplicity,
                         'delta_kick:qnumber:pg':self.target.pg})
 
-        logbook.update({'delta_kick:tag':'DKET_DELTA_KICK'})
+        
+        #==== Tag the output MPS ====#
+        rket_info.tag = 'DKET_DELTA_KICK'
+        logbook.update({'delta_kick:tag':rket_info.tag})
+        
 
-        if comp == 'hybrid':
-            cmps_ref = bs.MultiMPS.make_complex(mps, "mps_delta_kick_ref")
-            rkets = bs.MultiMPS.make_complex(mps, "DKET_DELTA_KICK")
+        #==== Set the bond dimension of output MPS ====#
+        rket_info.set_bond_dimension(mps.info.bond_dim)
+        if occs is None:
+            if self.verbose >= 2:
+                _print("Using FCI INIT MPS")
+            rket_info.set_bond_dimension(mps.info.bond_dim)
         else:
-            cmps_ref = mps.deep_copy('mps_delta_kick_ref')
-            rkets = mps.deep_copy('DKET_DELTA_KICK')
+            if self.verbose >= 2:
+                _print("Using occupation number INIT MPS")
+            if self.idx is not None:
+                occs = occs[self.idx]
+            rket_info.set_bond_dimension_using_occ(
+                mps.info.bond_dim, b2.VectorDouble(occs), bias=bias)
+
+            
+        #==== Initialization of output MPS ====#
+        if self.mpi is None or self.mpi.rank == 0:
+            rket_info.save_data(self.scratch + "/" + outmps_name)
         if self.mpi is not None:
             self.mpi.barrier()
+        rkets = bs.MPS(self.n_sites, mps.center, 2)
+        rkets.initialize(rket_info)
+        rkets.random_canonicalize()
+        rkets.save_mutable()
+        rket_info.save_mutable()
+        if self.mpi is not None:
+            self.mpi.barrier()
+        rkets.deallocate()
+        rket_info.deallocate_mutable()
 
-        if self.verbose >= 2:
-            _print('>>> START : Applying the delta kick <<<')
-        t = time.perf_counter()
-
+        
+        #==== Solve for the output MPS ====#
         ref_norm = self.b2driver.expectation(mps, idMPO_, mps).real
         kick_mean = -self.b2driver.expectation(
-            mps, self.kick_mpo, mps).imag / ref_norm
+            mps, rmpos, mps).imag / ref_norm
         kick_mpo_cpx = self.kick_mpo
         kick_mpo_cpx.const_e += 1j * kick_mean
 
-        self.b2driver.multiply(rkets, kick_mpo_cpx, cmps_ref,
-                               n_sweeps=fit_n_steps, tol=fit_conv_tol,
-                               bra_bond_dims=fit_bond_dims, noises=fit_noises,
-                               cutoff=cutoff, iprint=max(self.verbose-1, 0))
+        MPS_fitting(rkets, mps, kick_mpo_cpx, fit_bond_dims, fit_n_steps, fit_noises,
+                    fit_conv_tol, 'density_mat', cutoff, lmpo=mpo,
+                    verbose_lvl=self.verbose-1)
         excited_population = self.b2driver.expectation(rkets, idMPO_, rkets).real / ref_norm
         if not 0.0 <= excited_population <= 1.0:
             raise ValueError(f'Delta-kick excited population {excited_population} '
@@ -1513,12 +1567,13 @@ class MYTDDMRG:
                f'P_exc = {excited_population:.12g}, C0 = {ground_amplitude:.12g}')
 
         kick_mpo_cpx.const_e += ground_amplitude
-        self.b2driver.multiply(rkets, kick_mpo_cpx, cmps_ref,
-                               n_sweeps=fit_n_steps, tol=fit_conv_tol,
-                               bra_bond_dims=fit_bond_dims, noises=fit_noises,
-                               cutoff=cutoff, iprint=max(self.verbose-1, 0))
+        MPS_fitting(rkets, mps, kick_mpo_cpx, fit_bond_dims, fit_n_steps, fit_noises,
+                    fit_conv_tol, 'density_mat', cutoff, lmpo=mpo,
+                    verbose_lvl=self.verbose-1)
         _print('Output MPS max. bond dimension = ', rkets.info.bond_dim)
 
+            
+        #==== Normalize the output MPS if requested ====#
         if outmps_normal:
             _print('Normalizing the output MPS')
             icent = rkets.center
@@ -1533,10 +1588,17 @@ class MYTDDMRG:
             rkets.save_tensor(icent)
             rkets.unload_tensor(icent)
 
+
+        #==== Check the norm ====#
+        idMPO_ = bs.SimplifiedMPO(bs.IdentityMPO(self.hamil), bs.RuleQC(), True, True)
+        if self.mpi is not None:
+            idMPO_ = bs.ParallelMPO(idMPO_, self.identrule)
         nrm_ = self.b2driver.expectation(rkets, idMPO_, rkets)
         _print(f'Output MPS norm = Re: {nrm_.real:11.8f}, Im: {nrm_.imag:11.8f}')
         logbook.update({'delta_kick:norm':nrm_})
 
+            
+        #==== Print the energy of the output MPS ====#
         energy = calc_energy_MPS(mpo, rkets, 0)
         _print('Output MPS energy = ',
                '(%12.8f, %12.8fj) Hartree' % (energy.real, energy.imag) if comp=='full' else
@@ -1551,6 +1613,32 @@ class MYTDDMRG:
         _print('Occupations after delta kick:')
         self.print_occupation_table(dm1, None)
 
+           
+        #==== Partial charge ====#
+        dm1_full = make_full_dm(self.n_core, dm1)
+        orbs = np.concatenate((self.core_orbs, self.unordered_site_orbs()), axis=2)
+        self.qmul1, self.qlow1 = \
+            pcharge.calc(self.mol, dm1_full, orbs, self.ovl_ao)
+        print_pcharge(self.mol, self.qmul1, self.qlow1)
+        logbook.update({'delta_kick:mulliken':self.qmul1, 'delta_kick:lowdin':self.qlow1})
+
+        #==== Bond order ====#
+        self.bo_mul1, self.bo_low1 = bond_order.calc(self.mol, dm1_full, orbs, self.ovl_ao)
+        print_section('Mulliken bond orders', 2)
+        print_bond_order(self.bo_mul1)
+        print_section('Lowdin bond orders', 2)
+        print_bond_order(self.bo_low1)
+        
+        #==== Multipole analysis ====#
+        e_dpole, n_dpole, e_qpole, n_qpole = \
+            mpole.calc(self.mol, self.dpole_ao, self.qpole_ao, dm1_full, orbs)
+        print_mpole(e_dpole, n_dpole, e_qpole, n_qpole)
+        logbook.update({'delta_kick:e_dipole':e_dpole, 'delta_kick:n_dipole':n_dpole,
+                        'delta_kick:e_quadpole':e_qpole, 'delta_kick:n_quadpole':n_qpole})
+
+            
+        #==== Save the output MPS ====#
+        _print('')
         if outmps_dir != self.scratch:
             if self.mpi is None or self.mpi.rank == 0:
                 b2tools.mkDir(outmps_dir)

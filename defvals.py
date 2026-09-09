@@ -41,7 +41,7 @@ def_ann_out_cpx = False
 
 def_delta_kick_inmps_fname = 'GS_MPS_INFO'
 def_delta_kick_outmps_fname = 'DK_MPS_INFO'
-def_delta_kick_fit_noise = [1e-5]*4 + [1E-6]*4 + [0.0]
+def_delta_kick_fit_noise = None 
 def_delta_kick_fit_tol = 1E-7
 def_delta_kick_fit_steps = 50
 def_delta_kick_fit_cutoff = 1E-14
@@ -49,6 +49,8 @@ def_delta_kick_fit_occs = None
 def_delta_kick_fit_bias = 1.0
 def_normalize_delta_kickout = True
 def_save_delta_kick_1pdm = False
+def_delta_kick_inmps_cpx = False
+def_delta_kick_inmps_multi = False
 
 def_te_inmps_fname = 'ANN_MPS_INFO'
 def_te_method = 'tdvp'
