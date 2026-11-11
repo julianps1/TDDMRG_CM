@@ -218,6 +218,20 @@ def get_inputs(inp_file):
     except:
         inputs['mrci'] = defvals.def_mrci
 
+    # bo_pairs:
+    #   Atom pairs for Mulliken and Lowdin bond-order analysis. Atom indices are
+    #   1-based. None skips the analysis, True analyzes all pairs, and a sequence
+    #   of pairs analyzes only the specified pairs.
+    try:
+        inputs['bo_pairs'] = bo_pairs
+    except NameError:
+        inputs['bo_pairs'] = defvals.def_bo_pairs
+    if (isinstance(inputs['bo_pairs'], (tuple, list, np.ndarray)) and
+        len(inputs['bo_pairs']) == 2 and
+        all(isinstance(atom, (int, np.integer)) and not isinstance(atom, bool)
+            for atom in inputs['bo_pairs'])):
+        inputs['bo_pairs'] = (tuple(inputs['bo_pairs']),)
+
     #==== Ground state parameters ====#
     # do_groundstate:
     #   True or False. If True, a groundstate DMRG calculation will be performed.
@@ -888,13 +902,6 @@ def get_inputs(inp_file):
             inputs['te_in_singlet_embed'] = te_in_singlet_embed
         except NameError:
             inputs['te_in_singlet_embed'] = defvals.def_te_in_singlet_embed
-
-        # bo_pairs:
-        #   Lowdin bond order.
-        try:
-            inputs['bo_pairs'] = bo_pairs
-        except NameError:
-            inputs['bo_pairs'] = defvals.def_bo_pairs
 
     return inputs
 #######################################################

@@ -2,7 +2,7 @@
 
 # TDDMRG_CM
 
-TDDMRG_CM is a Python program designed to make the workflow of simulating charge migration using the time-dependent density matrix renormalization group (TDDMRG) easy and straightforward. It consists of three main functionalities: ground state DMRG, application of annihilation operator, and time evolution using TDDMRG. This program is built on top of BLOCK2 (https://github.com/block-hczhai/block2-preview) and PySCF (https://github.com/pyscf/pyscf), therefore, these two programs must already be installed before using TDDMRG_CM. 
+TDDMRG_CM is a Python program designed to make the workflow of simulating charge migration using the time-dependent density matrix renormalization group (TDDMRG) easy and straightforward. It consists of four main functionalities: ground state DMRG, application of an annihilation operator, application of a delta kick, and time evolution using TDDMRG. This program is built on top of BLOCK2 (https://github.com/block-hczhai/block2-preview) and PySCF (https://github.com/pyscf/pyscf), therefore, these two programs must already be installed before using TDDMRG_CM.
 
 
 ## Installation from GitHub
@@ -298,6 +298,46 @@ Using singlet-embedded MPS for a non-singlet MPS for time evolution using TDDMRG
 As also shown in the cited publication above, using full complex MPS type in TDDMRG time evolution rather than the hybrid one is much more favorable due to the faster convergence with bond dimension. Performing ground state and annihilation operator calculations in the full complex mode where the MPSs are complex is possible by setting `complex_MPS_type = 'full'`. While this should yield exactly the same results, this is redundant since these calculations do not necessitate a complex wave function. A much more efficient way is to convert the output MPS from annihilation task run in a `'hybrid'` mode to a full complex MPS form. This is done by setting `ann_out_cpx = True`.
 
 
+## Delta Kick
+The delta-kick workflow produces an initial state for field-free time evolution by applying an impulsive electric-field perturbation to an input MPS within the dipole approximation. The three entries of `delta_kick` specify the Cartesian components of the kick. TDDMRG_CM constructs the corresponding one-electron position operator in the active-orbital basis and fits the kicked state to an output MPS. Unlike the ground-state and annihilation workflows, the delta-kick workflow requires `complex_MPS_type = 'full'`. The kick is intended for the linear-response regime, so its magnitude must remain sufficiently small for the results to be physically meaningful.
+
+The following input illustrates a delta kick applied to a previously saved ground-state MPS. As in the annihilation workflow, values describing the molecule and active space can be loaded from the previous logbook.
+```python
+from os.path import abspath
+
+prefix = 'H2O'
+GS_PATH = '..'
+prev_logbook = abspath(GS_PATH + '/H2O.lb')
+complex_MPS_type = 'full'
+
+atoms = 'logbook'
+basis = 'logbook'
+group = 'logbook'
+wfn_sym = 'logbook'
+orb_path = 'logbook'
+orb_order = 'logbook:orb_order_id'
+
+nCore = 'logbook'
+nCAS = 'logbook'
+nelCAS = 'logbook'
+twos = 'logbook'
+
+do_groundstate = False
+do_annihilate = False
+
+do_delta_kick = True
+if do_delta_kick:
+    delta_kick = (0.0, 0.0, 0.001)
+    D_delta_kick_fit = [500]
+    delta_kick_inmps_dir = abspath(GS_PATH + '/H2O.gs-mps')
+    delta_kick_outmps_dir = './' + prefix + '.dk-mps'
+
+do_timeevo = False
+```
+
+Here, the kick is polarized along the Cartesian z direction. Both `delta_kick` and `field_origin` use the same Cartesian coordinate system as the molecular geometry. The input MPS defaults to `GS_MPS_INFO` under `delta_kick_inmps_dir`, while the output MPS information is saved as `DK_MPS_INFO` under `delta_kick_outmps_dir`. The output includes its norm, energy, orbital occupations, partial charges, requested bond orders, and multipole moments. It can subsequently be used as the initial MPS for time evolution by setting `te_inmps_dir` and, because it is complex, `te_inmps_cpx = True`.
+
+
 ## Time Evolution
 The MPS resulting from the annihilation operator task above is typically used as the initial state for time evolution tasks using TDDMRG. For the first example, let's simulate a time evolution with singlet-embedding on. So, first create a new directory, for example, as a subdirectory under the annihilation operator simulation using singlet-embedding. The Python script below, also available in `TDDMRG_CM/examples/H2O/H2O.annihilate-ocpx/H2O.tevo/H2O.py`, is a minimal example
 ```python
@@ -347,6 +387,19 @@ Parameters for time evolution is given under the `do_timeevo` block. Since entan
 Similar to the case of annihilation task, the time evolution task also defines two input parameters that control the program on where to look for the initial MPS: `te_inmps_dir` (for the directory) and `te_inmps_fname` (for the MPS info file). `te_inmps_fname` is omitted in the input script above because its default value is `ANN_MPS_INFO`, which coincides with the default value for `ann_outmps_fname`, the parameter that controls the filename of output MPS info file of an annihilation task.
 
 The first time evolution example above has singlet-embedding turned on. This greatly increases the efficiency of TDDMRG simulation without virtually affecting the accuracy (see [this paper](https://doi.org/10.1021/acs.jctc.4c01185)). If you want to see how the performance is affected by this optional parameter, you can run the same time evolution without singlet-embedding. To do this, simply create another annihilation operator directory under ground state directory. Run the annihilation task using the same input script as [the previous one](#annihilation-operator) except that `ann_out_singlet_embed` should be omitted or be given a `False`. Then, perform a time evolution simulation with the same input script as above except that `nelCAS = 7`, `twos = 1`, and `te_in_singlet_embed` omitted. You should see that the previous time evolution with singlet-embedding on runs about twice as fast as the one without singlet-embedding. The input scripts for the non-singlet-embedding simulations may be found in `examples/H2O/H2O.annihilate-ocpx-nose/H2O.py` and `examples/H2O/H2O.annihilate-ocpx-nose/H2O.tevo/H2O.py`.
+
+
+### Time evolution under a static field
+A time-independent electric field can be included in the Hamiltonian used for time evolution by specifying `static_electric_field`. The interaction with the static field is treated within the dipole approximation. Its three entries are the Cartesian x, y, and z components of the field in atomic units. TDDMRG_CM constructs the corresponding one-electron position-operator contribution in the active-orbital basis and adds it to the one-electron Hamiltonian. The origin of the position operator is controlled by `field_origin`.
+
+For example, the following applies a static field along the Cartesian z direction during time evolution:
+```python
+static_electric_field = (0.0, 0.0, 0.001)
+field_origin = (0.0, 0.0, 0.0)
+include_core_field_energy = True
+```
+
+When frozen core orbitals are present, `include_core_field_energy` controls whether their static-field contribution is included in the core energy. The static field is added when the Hamiltonian is constructed, before any requested workflow begins. Consequently, if ground-state DMRG, annihilation, or delta kick is enabled in the same program invocation, that workflow will use the static-field Hamiltonian as well. To propagate a previously prepared field-free MPS under a suddenly applied static field, run only the time-evolution workflow and load the field-free MPS through `te_inmps_dir` and `te_inmps_fname`.
 
 
 
@@ -419,7 +472,7 @@ The definitions of input parameters recognized by TDDMRG_CM are listed below. So
   <li><strong>Don&#39t set the sampling times (through  <code>te_sample</code>) too close one after another</strong> (i.e., having too frequent printings of time-dependent quantities) if you set <code>te_save_mps</code> to <code>'overwrite'</code> (the default) or <code>'sample'</code>. As for the <code>'overwrite'</code> option, this increases the risk of corrupting the saved MPS files when the program is terminated (e.g. due to time runout) while a MPS saving process is still ongoing, a complete MPS saving process can span a few minutes. Since, the previous MPS is overwritten, if the current MPS is not successfully saved, you have basically lost ability to restart the simulation. While for <code>'sampled'</code>, too frequent MPS savings can take up a huge space.</li>
   <li>Even if you follow the previous advice about sampling time, the option <code>'overwrite'</code> is still not totally fail-proof as program termination can still happen when a MPS saving is in progress. As a general advice, <strong>if your simulation has been running for ~3 days, consider saving the time-dependent MPS at a close future (e.g. 1-2 sampling time points ahead) using a proble file</strong> to serve as a checkpoint and ensure that the MPS saving is completed by making sure that the line <code>The current MPS has been successfully saved under /path/to/probe/file/directory</code> is printed in the output. MPSs saved through probe files will not get overwritten since they are saved in their respective <code>&ltprefix&gt.sample/tevo-*</code> directory. If instead the program terminates during a MPS saving set through a probe file, the previous &#39normally&#39 saved MPS in <code>&ltprefix&gt.mps_t</code> can be used for restart since it does not get overwritten. Do this again after several days of further program run if it has not finished yet.
 </ol>
-These input parameters may be categorized into general input (needed by all three functionalities), ground state, annihilation operation, and time evolution.
+These input parameters may be categorized into general input, ground state, annihilation operation, delta kick, and time evolution.
 
 ### ATTENTION - Change in input variable names
 Some older versions of TDDMRG_CM have a different naming for several input variables. These changed input parameters are
@@ -571,8 +624,12 @@ where the keywords on the right of the arrows are the current ones. If you find 
   If given the format-conforming value, it prompts an MRCI calculation using MPS. The format is a dictionary with two entries, <code>'nactive2'</code> and <code>'order'</code>. <code>'nactive2'</code> specifies the number of the excitation orbitals. <code>'nactive2':10</code> means that the last 10 orbitals of the nCAS active orbitals are considered to be the excitation orbitals. <code>'order'</code> specifies the excitation order. Currently, the available options for <code>'order'</code> are 1, 2, and 3, representing single, single-double, and single-double-triple excitations, respectively.
 </details>
 
-
-
+<details>
+  <summary><code>bo_pairs</code> (optional)</summary>
+  <strong>Default</strong>: <code>None</code>
+  <br>
+  Specifies the atom pairs for which Mulliken and Lowdin bond orders are calculated. Atom indices are 1-based. For a single pair, <code>bo_pairs = (1, 2)</code> calculates the bond order between atoms 1 and 2. The equivalent one-element sequence is <code>bo_pairs = ((1, 2),)</code>; note the trailing comma. For multiple pairs, <code>bo_pairs = ((1, 2), (2, 3))</code> calculates the bond orders between atoms 1 and 2 and between atoms 2 and 3. When <code>bo_pairs = None</code>, bond-order analysis is skipped. For the final ground-state, annihilation, and delta-kick analyses, <code>bo_pairs = True</code> calculates the bond orders for all atom pairs. Explicit atom pairs use the same format for these analyses and for time evolution. Because calculating every atom pair can be expensive for large molecules, specifying only the pairs of interest is recommended.
+</details>
 ### Ground state
 
 <details>
@@ -812,6 +869,131 @@ where the keywords on the right of the arrows are the current ones. If you find 
 </details>
 
 
+### Delta kick
+
+<details>
+  <summary><code>do_delta_kick</code> (optional)</summary>
+  <strong>Default</strong>: <code>False</code>
+  <br>
+  True or False. If True, the program will apply a delta kick to the given input MPS. Delta-kick calculations require <code>complex_MPS_type = 'full'</code>.
+</details>
+
+<details>
+  <summary><code>delta_kick</code></summary>
+  A three-entry sequence containing the Cartesian x, y, and z components of the delta kick. For example, <code>(0.0, 0.0, 0.001)</code> applies a kick polarized along the z direction. This input is required when <code>do_delta_kick = True</code>.
+</details>
+
+<details>
+  <summary><code>D_delta_kick_fit</code></summary>
+  An integer or a list containing the schedule of bond dimensions used during the MPS fitting iterations. Its format follows the same convention as <code>D_ann_fit</code>. This input is required when <code>do_delta_kick = True</code>.
+</details>
+
+<details>
+  <summary><code>delta_kick_inmps_dir</code> (optional)</summary>
+  <strong>Default</strong>: scratch directory.
+  <br>
+  The path to the directory containing the input MPS to which the delta kick will be applied.
+</details>
+
+<details>
+  <summary><code>delta_kick_inmps_fname</code> (optional)</summary>
+  <strong>Default</strong>: <code>'GS_MPS_INFO'</code>
+  <br>
+  The filename of the input MPS information file. It must be located under <code>delta_kick_inmps_dir</code>.
+</details>
+
+<details>
+  <summary><code>delta_kick_inmps_cpx</code> (optional)</summary>
+  <strong>Default</strong>: <code>False</code>
+  <br>
+  True or False. Set it to True if the input MPS is stored in full complex representation and False if it is real.
+</details>
+
+<details>
+  <summary><code>delta_kick_inmps_multi</code> (optional)</summary>
+  <strong>Default</strong>: <code>False</code>
+  <br>
+  True or False. Set it to True if the input MPS is stored as a multi-MPS. Multi-MPS input is not supported when <code>mrci</code> is active.
+</details>
+
+<details>
+  <summary><code>delta_kick_outmps_dir</code> (optional)</summary>
+  <strong>Default</strong>: scratch directory.
+  <br>
+  The path to the directory in which the delta-kick output MPS will be saved.
+</details>
+
+<details>
+  <summary><code>delta_kick_outmps_fname</code> (optional)</summary>
+  <strong>Default</strong>: <code>'DK_MPS_INFO'</code>
+  <br>
+  The filename of the information file for the delta-kick output MPS. It is saved under <code>delta_kick_outmps_dir</code>.
+</details>
+
+<details>
+  <summary><code>delta_kick_fit_noise</code> (optional)</summary>
+  <strong>Default</strong>: <code>None</code>
+  <br>
+  A list containing the schedule of noise applied during the fitting iterations. Its format follows the same convention as <code>ann_fit_noise</code>. When it is None, zero noise is used.
+</details>
+
+<details>
+  <summary><code>delta_kick_fit_tol</code> (optional)</summary>
+  <strong>Default</strong>: <code>1E-7</code>
+  <br>
+  The convergence threshold used to terminate the delta-kick fitting iterations.
+</details>
+
+<details>
+  <summary><code>delta_kick_fit_steps</code> (optional)</summary>
+  <strong>Default</strong>: <code>50</code>
+  <br>
+  The maximum number of delta-kick fitting iterations.
+</details>
+
+<details>
+  <summary><code>delta_kick_fit_cutoff</code> (optional)</summary>
+  <strong>Default</strong>: <code>1E-14</code>
+  <br>
+  States with density-matrix eigenvalues below this number will be discarded during fitting, even when the bond dimension is large enough to retain them.
+</details>
+
+<details>
+  <summary><code>delta_kick_fit_occs</code> (optional)</summary>
+  <strong>Default</strong>: <code>None</code>
+  <br>
+  If set, the guess MPS for the fitting iterations is constructed using these active-orbital occupations. It must contain <code>nCAS</code> floating-point values.
+</details>
+
+<details>
+  <summary><code>delta_kick_fit_bias</code> (optional)</summary>
+  <strong>Default</strong>: <code>1.0</code>
+  <br>
+  A floating-point value used to bias the active-orbital occupations when constructing the fitting guess MPS. It is meaningful only when <code>delta_kick_fit_occs</code> is given.
+</details>
+
+<details>
+  <summary><code>normalize_delta_kickout</code> (optional)</summary>
+  <strong>Default</strong>: <code>True</code>
+  <br>
+  True or False. If True, the delta-kick output MPS is normalized after fitting.
+</details>
+
+<details>
+  <summary><code>save_delta_kick_1pdm</code> (optional)</summary>
+  <strong>Default</strong>: <code>False</code>
+  <br>
+  True or False. If True, the one-particle RDM of the delta-kick output MPS is saved as <code>DK_1pdm.npy</code> under <code>delta_kick_outmps_dir</code>.
+</details>
+
+<details>
+  <summary><code>field_origin</code> (optional)</summary>
+  <strong>Default</strong>: <code>(0.0, 0.0, 0.0)</code>
+  <br>
+  A three-entry sequence specifying the Cartesian origin used to construct the position operator for the delta kick. Its coordinates use the same frame as the molecular geometry.
+</details>
+
+
 
 
 
@@ -990,11 +1172,25 @@ where the keywords on the right of the arrows are the current ones. If you find 
   A 2-entry tuple with the first entry being True or False, while the second one is an integer. Specify this input with the first entry set to True if the initial MPS is in singlet-embedding format, and the second entry set to the actual number of active electrons in the system. Due to the singlet-embedded form, the number of electrons in the initial MPS is adjusted so that the total spin can be zero.
 </details>
 
+#### Time evolution under a static field
+
 <details>
-  <summary><code>bo_pairs</code> (optional)</summary>
+  <summary><code>static_electric_field</code> (optional)</summary>
   <strong>Default</strong>: <code>None</code>
   <br>
-  Lowdin bond order.
+  A three-entry sequence containing the Cartesian x, y, and z components of the static electric field in atomic units. For example, <code>(0.0, 0.0, 0.001)</code> applies a static field along the z direction. When it is None, no static electric field is added to the Hamiltonian.
 </details>
 
+<details>
+  <summary><code>field_origin</code> (optional)</summary>
+  <strong>Default</strong>: <code>(0.0, 0.0, 0.0)</code>
+  <br>
+  A three-entry sequence specifying the Cartesian origin used to construct the position operator for the static field. Its coordinates use the same frame as the molecular geometry. This input also defines the position-operator origin for a delta kick.
+</details>
 
+<details>
+  <summary><code>include_core_field_energy</code> (optional)</summary>
+  <strong>Default</strong>: <code>True</code>
+  <br>
+  True or False. If True and frozen core orbitals are present, their static-field contribution is added to the core energy. If False, the field modifies only the active-space one-electron Hamiltonian.
+</details>

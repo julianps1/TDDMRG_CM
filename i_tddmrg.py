@@ -93,12 +93,13 @@ except ImportError:
 #OLD_CPX         hasMPI = False
 
 from pyblock2 import tools as b2tools; b2tools.init(SX)
+from pyblock2.driver.core import (DMRGDriver, SymmetryTypes, MPOAlgorithmTypes, ParallelTypes)
 #OLD import tools; tools.init(SX)
 #from tools import saveMPStoDir, mkDir
 #OLD from tools import mkDir
 from TDDMRG_CM.utils.util_print import getVerbosePrinter
 from TDDMRG_CM.utils.util_print import print_section, print_warning, print_describe_content, print_matrix
-from TDDMRG_CM.utils.util_print import print_orb_occupations, print_pcharge, print_mpole, print_bond_order
+from TDDMRG_CM.utils.util_print import print_orb_occupations
 from TDDMRG_CM.utils.util_print import print_autocorrelation, print_td_pcharge, print_td_bo, \
     print_td_mpole
 from TDDMRG_CM.utils.util_qm import make_full_dm
@@ -106,7 +107,7 @@ from TDDMRG_CM.utils.util_mps import print_MPO_bond_dims, MPS_fitting, calc_ener
 from TDDMRG_CM.utils.util_mps import saveMPStoDir, loadMPSfromDir_OLD, loadMPSfromDir
 from TDDMRG_CM.utils.util_mps import trans_to_singlet_embed
 from TDDMRG_CM.utils import util_logbook
-from TDDMRG_CM.observables import pcharge, mpole, bond_order
+from TDDMRG_CM.observables import general_analysis, pcharge, mpole, bond_order
 from TDDMRG_CM.phys_const import au2fs
 
 if hasMPI:
@@ -214,6 +215,23 @@ class MYTDDMRG:
             self.pdmrule = None
             self.siterule = None
             self.identrule = None
+        
+        if spin_symmetry == 'su2': symm_type = [SymmetryTypes.SU2]
+        elif spin_symmetry == 'sz': symm_type = [SymmetryTypes.SZ]
+        if comp == 'full': symm_type += [SymmetryTypes.CPX]
+        self.b2driver = DMRGDriver(
+            scratch=self.scratch, symm_type=symm_type, clean_scratch=False,
+            stack_mem=self.memory, n_threads=self.omp_threads, mpi=self.mpi is not None) 
+        #self.mpi = self.b2driver.mpi #NOTE: Some issue with flag overwrite?
+        if self.mpi is not None:
+            self.prule = bs.ParallelRuleQC(self.mpi)
+            # Match block2main: build the full MPO on every rank, then
+            # distribute its QC operators through ParallelRuleQC.
+            self.b2driver.prule = self.prule
+            #self.pdmrule = bs.ParallelRuleNPDMQC(self.mpi)
+            self.pdmrule = bs.ParallelRulePDM1QC(self.mpi) #NOTE: How implemented in block2 core.py; better scalability
+            self.siterule = bs.ParallelRuleSiteQC(self.mpi)
+            self.identrule = bs.ParallelRuleIdentity(self.mpi)
 
         #==== Some persistent quantities ====#
         self.mol = mol
@@ -327,24 +345,6 @@ class MYTDDMRG:
 
         #==== Initialize self.fcidump ====#
         assert self.fcidump is None
-        from pyblock2.driver.core import (
-            DMRGDriver, SymmetryTypes, MPOAlgorithmTypes, ParallelTypes)
-        if spin_symmetry == 'su2': symm_type = [SymmetryTypes.SU2]
-        elif spin_symmetry == 'sz': symm_type = [SymmetryTypes.SZ]
-        if comp == 'full': symm_type += [SymmetryTypes.CPX]
-        self.b2driver = DMRGDriver(
-            scratch=self.scratch, symm_type=symm_type, clean_scratch=False,
-            stack_mem=self.memory, n_threads=self.omp_threads, mpi=self.mpi is not None) #NOTE: Why were these hardcoded 4 << 30 and 56??
-        #self.mpi = self.b2driver.mpi #NOTE: Some issue with flag overwrite?
-        if self.mpi is not None:
-            self.prule = bs.ParallelRuleQC(self.mpi)
-            # Match block2main: build the full MPO on every rank, then
-            # distribute its QC operators through ParallelRuleQC.
-            self.b2driver.prule = self.prule
-            #self.pdmrule = bs.ParallelRuleNPDMQC(self.mpi)
-            self.pdmrule = bs.ParallelRulePDM1QC(self.mpi) #NOTE: How implemented in block2 core.py; better scalability
-            self.siterule = bs.ParallelRuleSiteQC(self.mpi)
-            self.identrule = bs.ParallelRuleIdentity(self.mpi)
         self.fcidump = bx.FCIDUMP()
         self.groupname = pg
         assert n_elec == self.nel_site, \
@@ -670,7 +670,7 @@ class MYTDDMRG:
     def dmrg(self, logbook_in, bond_dims, noises, n_steps=30, dav_tols=1E-5, conv_tol=1E-7, 
              cutoff=1E-14, occs=None, bias=1.0, outmps_dir0=None, outmps_name='GS_MPS_INFO',
              save_1pdm=False, flip_spect=False, mrci_info=None, inmps_dir=None,
-             inmps_name='mps_info.bin', out_cpx=False):
+             inmps_name='mps_info.bin', out_cpx=False, bo_pairs=None):
         
         """Ground-State DMRG."""
         logbook = logbook_in.copy()
@@ -821,26 +821,21 @@ class MYTDDMRG:
         for i in range(0, 2): occs0[i,:] = np.diag(dm0_full[i,:,:]).copy().real
         print_orb_occupations(occs0)
                     
-        #==== Partial charge ====#
+        #==== General 1PDM analysis ====#
         orbs = np.concatenate((self.core_orbs, self.unordered_site_orbs()), axis=2)
-        self.qmul0, self.qlow0 = \
-            pcharge.calc(self.mol, dm0_full, orbs, self.ovl_ao)
-        print_pcharge(self.mol, self.qmul0, self.qlow0)
+        analysis = general_analysis.analyze_1pdm(
+            self.mol, dm0_full, orbs, self.ovl_ao,
+            self.dpole_ao, self.qpole_ao, bo_pairs=bo_pairs)
+        self.qmul0 = analysis['mulliken']
+        self.qlow0 = analysis['lowdin']
+        self.bo_mul0 = analysis['mulliken_bond_order']
+        self.bo_low0 = analysis['lowdin_bond_order']
         logbook.update({'gs:mulliken':self.qmul0, 'gs:lowdin':self.qlow0})
-
-        #==== Bond order ====#
-        self.bo_mul0, self.bo_low0 = bond_order.calc(self.mol, dm0_full, orbs, self.ovl_ao)
-        print_section('Mulliken bond orders', 2)
-        print_bond_order(self.bo_mul0)
-        print_section('Lowdin bond orders', 2)
-        print_bond_order(self.bo_low0)
-
-        #==== Multipole analysis ====#
-        e_dpole, n_dpole, e_qpole, n_qpole = \
-            mpole.calc(self.mol, self.dpole_ao, self.qpole_ao, dm0_full, orbs)
-        print_mpole(e_dpole, n_dpole, e_qpole, n_qpole)
-        logbook.update({'gs:e_dipole':e_dpole, 'gs:n_dipole':n_dpole,
-                        'gs:e_quadpole':e_qpole, 'gs:n_quadpole':n_qpole})
+        logbook.update({
+            'gs:e_dipole':analysis['electronic_dipole'],
+            'gs:n_dipole':analysis['nuclear_dipole'],
+            'gs:e_quadpole':analysis['electronic_quadrupole'],
+            'gs:n_quadpole':analysis['nuclear_quadrupole']})
 
         #==== Conversion to full complex MPS ====#
         if out_cpx:
@@ -982,7 +977,7 @@ class MYTDDMRG:
                    pg, inmps_dir0=None, inmps_name='GS_MPS_INFO', outmps_dir0=None,
                    outmps_name='ANN_MPS_INFO', aorb_thr=1.0E-12, alpha=True, cutoff=1E-14, occs=None,
                    bias=1.0, outmps_normal=True, save_1pdm=False, out_singlet_embed=False, 
-                   out_cpx=False, mrci_info=None, mps_tag=None):
+                   out_cpx=False, mrci_info=None, mps_tag=None, bo_pairs=None):
         """
         aorb can be int, numpy.ndarray, or 'nat<n>' where n is an integer'
         """
@@ -1329,27 +1324,22 @@ class MYTDDMRG:
                 self.print_occupation_table(dm1, aorb[self.ridx])
 
            
-        #==== Partial charge ====#
+        #==== General 1PDM analysis ====#
         dm1_full = make_full_dm(self.n_core, dm1)
         orbs = np.concatenate((self.core_orbs, self.unordered_site_orbs()), axis=2)
-        self.qmul1, self.qlow1 = \
-            pcharge.calc(self.mol, dm1_full, orbs, self.ovl_ao)
-        print_pcharge(self.mol, self.qmul1, self.qlow1)
+        analysis = general_analysis.analyze_1pdm(
+            self.mol, dm1_full, orbs, self.ovl_ao,
+            self.dpole_ao, self.qpole_ao, bo_pairs=bo_pairs)
+        self.qmul1 = analysis['mulliken']
+        self.qlow1 = analysis['lowdin']
+        self.bo_mul1 = analysis['mulliken_bond_order']
+        self.bo_low1 = analysis['lowdin_bond_order']
         logbook.update({'ann:mulliken':self.qmul1, 'ann:lowdin':self.qlow1})
-
-        #==== Bond order ====#
-        self.bo_mul1, self.bo_low1 = bond_order.calc(self.mol, dm1_full, orbs, self.ovl_ao)
-        print_section('Mulliken bond orders', 2)
-        print_bond_order(self.bo_mul1)
-        print_section('Lowdin bond orders', 2)
-        print_bond_order(self.bo_low1)
-        
-        #==== Multipole analysis ====#
-        e_dpole, n_dpole, e_qpole, n_qpole = \
-            mpole.calc(self.mol, self.dpole_ao, self.qpole_ao, dm1_full, orbs)
-        print_mpole(e_dpole, n_dpole, e_qpole, n_qpole)
-        logbook.update({'ann:e_dipole':e_dpole, 'ann:n_dipole':n_dpole,
-                        'ann:e_quadpole':e_qpole, 'ann:n_quadpole':n_qpole})
+        logbook.update({
+            'ann:e_dipole':analysis['electronic_dipole'],
+            'ann:n_dipole':analysis['nuclear_dipole'],
+            'ann:e_quadpole':analysis['electronic_quadrupole'],
+            'ann:n_quadpole':analysis['nuclear_quadrupole']})
 
 
         #==== Singlet embedding ====#
@@ -1421,7 +1411,7 @@ class MYTDDMRG:
                    inmps_dir0=None, inmps_name='GS_MPS_INFO', inmps_cpx=False,
                    inmps_multi=False, outmps_dir0=None, outmps_name='DK_MPS_INFO',
                    cutoff=1E-14, occs=None, bias=1.0, outmps_normal=True,
-                   save_1pdm=False, mrci_info=None):
+                   save_1pdm=False, mrci_info=None, bo_pairs=None):
         logbook = logbook_in.copy()
 
         if comp != 'full':
@@ -1617,27 +1607,22 @@ class MYTDDMRG:
         self.print_occupation_table(dm1, None)
 
            
-        #==== Partial charge ====#
+        #==== General 1PDM analysis ====#
         dm1_full = make_full_dm(self.n_core, dm1)
         orbs = np.concatenate((self.core_orbs, self.unordered_site_orbs()), axis=2)
-        self.qmul1, self.qlow1 = \
-            pcharge.calc(self.mol, dm1_full, orbs, self.ovl_ao)
-        print_pcharge(self.mol, self.qmul1, self.qlow1)
+        analysis = general_analysis.analyze_1pdm(
+            self.mol, dm1_full, orbs, self.ovl_ao,
+            self.dpole_ao, self.qpole_ao, bo_pairs=bo_pairs)
+        self.qmul1 = analysis['mulliken']
+        self.qlow1 = analysis['lowdin']
+        self.bo_mul1 = analysis['mulliken_bond_order']
+        self.bo_low1 = analysis['lowdin_bond_order']
         logbook.update({'delta_kick:mulliken':self.qmul1, 'delta_kick:lowdin':self.qlow1})
-
-        #==== Bond order ====#
-        self.bo_mul1, self.bo_low1 = bond_order.calc(self.mol, dm1_full, orbs, self.ovl_ao)
-        print_section('Mulliken bond orders', 2)
-        print_bond_order(self.bo_mul1)
-        print_section('Lowdin bond orders', 2)
-        print_bond_order(self.bo_low1)
-        
-        #==== Multipole analysis ====#
-        e_dpole, n_dpole, e_qpole, n_qpole = \
-            mpole.calc(self.mol, self.dpole_ao, self.qpole_ao, dm1_full, orbs)
-        print_mpole(e_dpole, n_dpole, e_qpole, n_qpole)
-        logbook.update({'delta_kick:e_dipole':e_dpole, 'delta_kick:n_dipole':n_dpole,
-                        'delta_kick:e_quadpole':e_qpole, 'delta_kick:n_quadpole':n_qpole})
+        logbook.update({
+            'delta_kick:e_dipole':analysis['electronic_dipole'],
+            'delta_kick:n_dipole':analysis['nuclear_dipole'],
+            'delta_kick:e_quadpole':analysis['electronic_quadrupole'],
+            'delta_kick:n_quadpole':analysis['nuclear_quadrupole']})
 
             
         #==== Save the output MPS ====#
@@ -1967,12 +1952,7 @@ class MYTDDMRG:
         #==== Load the initial MPS ====#
         loadv2 = True
         if loadv2:
-            ## Keep the bond-one identity replicated on each rank.  Its
-            ## contractions are inexpensive and do not require MPI collectives.
-            idMPO = bs.SimplifiedMPO(bs.IdentityMPO(self.hamil), bs.Rule())
-            #idMPO = self.b2driver.get_identity_mpo()
-            if self.mpi is not None:
-                idMPO = bs.ParallelMPO(idMPO, self.identrule)
+            idMPO = self.b2driver.get_identity_mpo()
 
 
             #==== Determine initial MPS type (normal, multi, or MRCI) ====#
@@ -2056,15 +2036,6 @@ class MYTDDMRG:
         
         #==== Initial norm ====#
         print_MPO_bond_dims(idMPO, 'Identity_2')
-    #    idN = bs.MovingEnvironment(idMPO, mps, mps, "norm_in")
-    #    idN.delayed_contraction = b2.OpNamesSet.normal_ops()
-    #    idN.cached_contraction = False
-    #    idN.fused_contraction_rotation = True
-    #    idN.save_environments = False
-    #    idN.init_environments(False)
-    #    nrm = bs.Expect(idN, mps.info.bond_dim, mps.info.bond_dim)
-    #    nrm.iprint = max(self.verbose - 1, 0)
-    #    nrm_ = nrm.solve(False, mps.center != 0)
         nrm_ = self.b2driver.expectation(mps, idMPO, mps, iprint=max(self.verbose -1, 0))
 
         #if self.mpi is not None:
@@ -2130,10 +2101,6 @@ class MYTDDMRG:
             _print('Algorithm type = 2-site')
         elif cmps.dot == 1:
             _print('Algorithm type = 1-site')
-
-        #==== Initial setups for autocorrelation ====#
-        #idME = bs.MovingEnvironment(idMPO, cmps_act0, cmps, "acorr")
-            
         
         #==== Initial setups for time evolution ====#
         te_iprint = min(verbosity, 2)
@@ -2238,12 +2205,6 @@ class MYTDDMRG:
                 _print('This is the starting time point, nothing happened yet.')
                         
             #==== Autocorrelation and norm ====#
-           # idME.init_environments()   # NOTE: Why does it have to be here instead of between 'idMe =' and 'acorr =' lines.
-           # if comp == 'hybrid':
-           #     acorr = brs.ComplexExpect(idME, max_bond_dim, max_bond_dim)
-           # elif comp == 'full':
-           #     acorr = bs.Expect(idME, max_bond_dim, max_bond_dim)
-
             #acorr_t = 1.0
             acorr_t = self.b2driver.expectation(cmps_act0, idMPO, cmps, iprint=max(self.verbose - 1, 0))
             if it == 0:
@@ -2252,7 +2213,7 @@ class MYTDDMRG:
                 normsqs = te.normsqs[-1] #NOTE: Should this be uses the last norm?
             acorr_t = acorr_t / np.sqrt(normsqs)
                             
-            #==== 2t autocorrelation ====#
+            #==== 2t autocorrelation ====# 
             if comp == 'hybrid':
                 if cmps.wfns[0].data.size == 0:
                     loaded = True

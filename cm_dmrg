@@ -418,7 +418,7 @@ if inputs['do_groundstate']:
                        inputs['gs_occs'], inputs['gs_bias'], inputs['gs_outmps_dir'], 
                        inputs['gs_outmps_fname'], inputs['save_gs_1pdm'], inputs['flip_spectrum'],
                        inputs['mrci'], inputs['gs_inmps_dir'], inputs['gs_inmps_fname'],
-                       inputs['gs_out_cpx'])
+                       inputs['gs_out_cpx'], bo_pairs=inputs['bo_pairs'])
     _print('\n')
 logbook.update(inputs)
 
@@ -453,7 +453,7 @@ if inputs['do_annihilate']:
                        inputs['ann_orb_thr'], inputs['ann_sp'], inputs['ann_fit_cutoff'], 
                        inputs['ann_fit_occs'], inputs['ann_fit_bias'], inputs['normalize_annout'], 
                        inputs['save_ann_1pdm'], inputs['ann_out_singlet_embed'], inputs['ann_out_cpx'],
-                       inputs['mrci'])
+                       inputs['mrci'], bo_pairs=inputs['bo_pairs'])
     _print('\n')
 logbook.update(inputs) 
 
@@ -488,7 +488,8 @@ if inputs['do_delta_kick']:
                        inputs['delta_kick_outmps_dir'], inputs['delta_kick_outmps_fname'],
                        inputs['delta_kick_fit_cutoff'], inputs['delta_kick_fit_occs'],
                        inputs['delta_kick_fit_bias'], inputs['normalize_delta_kickout'],
-                       inputs['save_delta_kick_1pdm'], inputs['mrci'])
+                       inputs['save_delta_kick_1pdm'], inputs['mrci'],
+                       bo_pairs=inputs['bo_pairs'])
     _print('\n')
 logbook.update(inputs)
 
