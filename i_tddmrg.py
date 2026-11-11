@@ -716,6 +716,7 @@ class MYTDDMRG:
                     loadMPSfromDir(inmps_dir, inmps_name, complex_mps, mps_type, idMPO_,
                                    cached_contraction=True, MPI=self.mpi, 
                                    prule=self.prule if self.mpi is not None else None)
+            self.b2driver.align_mps_center(mps, 0)
         else:
             if mrci_info is not None:
                 assert mrci_info['order'] in [1, 2, 3]
@@ -1064,6 +1065,7 @@ class MYTDDMRG:
                 loadMPSfromDir(inmps_dir, inmps_name, complex_mps, mps_type, idMPO_,
                                cached_contraction=True, MPI=self.mpi, 
                                prule=self.prule if self.mpi is not None else None)  # 1)
+        self.b2driver.align_mps_center(mps, 0)
         # At the moment, the annihilator function does not support input MPS of the
         # type multi MPS.
         _print('Input MPS max. bond dimension = ', mps.info.bond_dim)
@@ -1476,6 +1478,7 @@ class MYTDDMRG:
                 loadMPSfromDir(inmps_dir, inmps_name, inmps_cpx, mps_type, idMPO_,
                                cached_contraction=True, MPI=self.mpi,
                                prule=self.prule if self.mpi is not None else None)
+        self.b2driver.align_mps_center(mps, 0)
         _print('Input MPS max. bond dimension = ', mps.info.bond_dim)
         assert mps_info.target.n == self.nel_site, \
             'The number of active space electrons from the quantum number label does ' + \
@@ -1992,6 +1995,7 @@ class MYTDDMRG:
                 loadMPSfromDir(inmps_dir, inmps_name, inmps_cpx, mps_type, idMPO,
                                cached_contraction=True, MPI=self.mpi, 
                                prule=self.prule if self.mpi is not None else None)
+            self.b2driver.align_mps_center(mps, 0)
 
             
             #==== Determine the type of t=0 MPS for autocorrelation ====#
@@ -2031,6 +2035,7 @@ class MYTDDMRG:
                         mps_act0_type, idMPO, cached_contraction=True,
                         MPI=self.mpi,
                         prule=self.prule if self.mpi is not None else None)
+                self.b2driver.align_mps_center(mps_act0, 0)
             #ipsh('After loading mps')
         else:
             raise NotImplementedError('Use loadv2.')

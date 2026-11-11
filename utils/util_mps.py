@@ -285,8 +285,8 @@ def loadMPSfromDir_OLD(mps_info: brs.MPSInfo,  mpsSaveDir:str, MPI:MPICommunicat
 
 #################################################
 #################################################
-def loadMPSfromDir(mpsSaveDir:str, mpstag:str, complex_mps:bool, mps_type:dict, impo, 
-                   ref_center=0, cached_contraction:bool=True, MPI:MPICommunicator=None, 
+def loadMPSfromDir(mpsSaveDir:str, mpstag:str, complex_mps:bool, mps_type:dict, impo,
+                   cached_contraction:bool=True, MPI:MPICommunicator=None,
                    prule=None) -> bs.MPS | bs.MultiMPS:
 
 
@@ -358,14 +358,15 @@ def loadMPSfromDir(mpsSaveDir:str, mpstag:str, complex_mps:bool, mps_type:dict, 
     mps.load_data()
     mps.load_mutable()
     if MPI is not None:
-        mps_state = np.zeros(2 + mps_info.n_sites, dtype=np.intc)
-        if MPI.rank == 0:
-            mps_state[:] = [mps.center, mps.dot] + [
-                ord(x) for x in str(mps.canonical_form)]
-        MPI.broadcast(mps_state, 0)
-        mps.center = int(mps_state[0])
-        mps.dot = int(mps_state[1])
-        mps.canonical_form = ''.join(chr(x) for x in mps_state[2:])
+        MPI.barrier()
+    #    mps_state = np.zeros(2 + mps_info.n_sites, dtype=np.intc)
+    #    if MPI.rank == 0:
+    #        mps_state[:] = [mps.center, mps.dot] + [
+    #            ord(x) for x in str(mps.canonical_form)]
+    #    MPI.broadcast(mps_state, 0)
+    #    mps.center = int(mps_state[0])
+    #    mps.dot = int(mps_state[1])
+    #    mps.canonical_form = ''.join(chr(x) for x in mps_state[2:])
 
     #==== Change canonical form for hybrid complex MPS ====#
     if mps.center == mps.n_sites - 1:
@@ -393,37 +394,6 @@ def loadMPSfromDir(mpsSaveDir:str, mpstag:str, complex_mps:bool, mps_type:dict, 
             if MPI is not None:
                 MPI.barrier()
             _print(cf + ' -> ' + mps.canonical_form)
-
-
-    #==== Further change canonical form (???) ====#
-    if mps.center != ref_center:      # 2)
-        _print('\n\nChange canonical form ...')
-        cf = str(mps.canonical_form)
-        if ref_center < mps.center:
-            if mps.dot == 2:
-                mps.center += 1
-                if mps.canonical_form[-1] in "CS":
-                    mps.canonical_form = mps.canonical_form[:-1] + "S"
-                else:
-                    mps.canonical_form = mps.canonical_form[:-1] + "T"
-            while mps.center != ref_center:
-                mps.move_left(None, prule if MPI is not None else None)
-        else:
-            mps.canonical_form = "K" + mps.canonical_form[1:]
-            while (mps.center != mps.n_sites - 1 and
-                   mps.center != ref_center + mps.dot - 1):
-                mps.move_right(None, prule if MPI is not None else None)
-            if mps.dot == 2:
-                mps.center -= 1
-        if MPI is not None:
-            MPI.barrier()
-        mps.save_data()
-        if MPI is not None:
-            MPI.barrier()
-        _print(cf + ' -> ' + mps.canonical_form)
-    # NOTES:
-    # 2) This is the direct tensor rotation used by DMRGDriver.align_mps_center.
-    #    Center alignment does not require an identity-MPO expectation sweep.
 
 
     forward = mps.center == 0
