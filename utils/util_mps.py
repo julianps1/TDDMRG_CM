@@ -359,14 +359,6 @@ def loadMPSfromDir(mpsSaveDir:str, mpstag:str, complex_mps:bool, mps_type:dict, 
     mps.load_mutable()
     if MPI is not None:
         MPI.barrier()
-    #    mps_state = np.zeros(2 + mps_info.n_sites, dtype=np.intc)
-    #    if MPI.rank == 0:
-    #        mps_state[:] = [mps.center, mps.dot] + [
-    #            ord(x) for x in str(mps.canonical_form)]
-    #    MPI.broadcast(mps_state, 0)
-    #    mps.center = int(mps_state[0])
-    #    mps.dot = int(mps_state[1])
-    #    mps.canonical_form = ''.join(chr(x) for x in mps_state[2:])
 
     #==== Change canonical form for hybrid complex MPS ====#
     if mps.center == mps.n_sites - 1:
